@@ -66,18 +66,20 @@ def summarize_metars(metar_data: dict) -> list[dict]:
         bases = [c.get("base") for c in clouds if c.get("base") is not None]
         ceil = f"{min(bases)} ft" if bases else "—"
 
-        out.append({
-            "icao": m.get("icaoId", "—"),
-            "name": m.get("name", ""),
-            "time_utc": time_utc,
-            "fltCat": m.get("fltCat", "—"),
-            "wind": wind,
-            "vis": m.get("visib", "—"),
-            "cover": cover,
-            "ceiling": ceil,
-            "temp_c": m.get("temp"),
-            "dewp_c": m.get("dewp"),
-            "altim_hpa": m.get("altim"),
-            "raw": m.get("rawOb", ""),
-        })
+       out.append({
+        "icao": m.get("icaoId", "—"),
+        "name": m.get("name", ""),
+        "time_utc": time_utc,
+        "fltCat": m.get("fltCat", "—"),
+        "wind": wind,
+        "wgst": m.get("wgst"),
+        "vis": m.get("visib", "—"),
+        "cover": cover,
+        "ceiling": ceil,
+        "temp_c": m.get("temp"),
+        "dewp_c": m.get("dewp"),
+        "altim_hpa": m.get("altim"),
+        "raw": m.get("rawOb", ""),
+    })
+
     return out
