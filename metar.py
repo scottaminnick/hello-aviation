@@ -34,11 +34,14 @@ def get_metars_cached(stations: list[str], ttl_seconds: int = 120) -> dict:
 
 from datetime import datetime, timezone
 
+from datetime import datetime, timezone
+
 def summarize_metars(metar_data: dict) -> list[dict]:
     """
     Convert AWC METAR JSON into a small, consistent summary list for the UI.
     """
-    out = []
+    out: list[dict] = []
+
     for m in metar_data.get("data", []):
         # Time: prefer reportTime; fallback to obsTime (epoch seconds)
         rt = m.get("reportTime")
@@ -46,7 +49,14 @@ def summarize_metars(metar_data: dict) -> list[dict]:
             time_utc = rt.replace(".000Z", "Z")
         else:
             obs = m.get("obsTime")
-            time_utc = datetime.fromtimestamp(obs, tz=timezone.utc).isoformat(timespec="minutes").replace("+00:00", "Z") if obs else "—"
+            if obs:
+                time_utc = (
+                    datetime.fromtimestamp(obs, tz=timezone.utc)
+                    .isoformat(timespec="minutes")
+                    .replace("+00:00", "Z")
+                )
+            else:
+                time_utc = "—"
 
         # Wind formatting
         wdir = m.get("wdir")
@@ -62,24 +72,25 @@ def summarize_metars(metar_data: dict) -> list[dict]:
         # Ceiling/cover quick read
         cover = m.get("cover") or "—"
         clouds = m.get("clouds") or []
-        # Grab the lowest layer base if available
         bases = [c.get("base") for c in clouds if c.get("base") is not None]
-        ceil = f"{min(bases)} ft" if bases else "—"
+        ceiling = f"{min(bases)} ft" if bases else "—"
 
-       out.append({
-        "icao": m.get("icaoId", "—"),
-        "name": m.get("name", ""),
-        "time_utc": time_utc,
-        "fltCat": m.get("fltCat", "—"),
-        "wind": wind,
-        "wgst": m.get("wgst"),
-        "vis": m.get("visib", "—"),
-        "cover": cover,
-        "ceiling": ceil,
-        "temp_c": m.get("temp"),
-        "dewp_c": m.get("dewp"),
-        "altim_hpa": m.get("altim"),
-        "raw": m.get("rawOb", ""),
-    })
+        out.append(
+            {
+                "icao": m.get("icaoId", "—"),
+                "name": m.get("name", ""),
+                "time_utc": time_utc,
+                "fltCat": m.get("fltCat", "—"),
+                "wind": wind,
+                "wgst": wgst,
+                "vis": m.get("visib", "—"),
+                "cover": cover,
+                "ceiling": ceiling,
+                "temp_c": m.get("temp"),
+                "dewp_c": m.get("dewp"),
+                "altim_hpa": m.get("altim"),
+                "raw": m.get("rawOb", ""),
+            }
+        )
 
     return out
