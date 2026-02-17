@@ -1,7 +1,7 @@
 import os
 from flask import Flask, jsonify, render_template_string
 from guidance import get_guidance_cached
-from metar import 
+from metar import get_metars_cached
 
 app = Flask(__name__)
 
@@ -73,5 +73,6 @@ def api_metars():
         ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
     )
     return jsonify(metars)
+
 
 
