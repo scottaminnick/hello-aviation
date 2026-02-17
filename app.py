@@ -1,7 +1,7 @@
 import os
 from flask import Flask, jsonify, render_template_string
 from guidance import get_guidance_cached
-from metar import get_metars_cached
+from metar import get_metars_cached, summarize_metars
 
 app = Flask(__name__)
 
@@ -41,6 +41,37 @@ HOME_TEMPLATE = """
     </div>
 
     <div class="card">
+      <h2>Latest METARs</h2>
+      <table style="width:100%; border-collapse: collapse;">
+        <thead>
+          <tr>
+            <th align="left">Station</th>
+            <th align="left">Time (UTC)</th>
+            <th align="left">Cat</th>
+            <th align="left">Wind</th>
+            <th align="left">Vis</th>
+            <th align="left">Ceiling</th>
+            <th align="left">Cover</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in metars %}
+          <tr>
+            <td><b>{{ m.icao }}</b></td>
+            <td>{{ m.time_utc }}</td>
+            <td>{{ m.fltCat }}</td>
+            <td>{{ m.wind }}</td>
+            <td>{{ m.vis }}</td>
+            <td>{{ m.ceiling }}</td>
+            <td>{{ m.cover }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="muted" style="margin-top:0.8rem;">Raw JSON: <a href="/api/metars">/api/metars</a></p>
+    </div>
+
+    <div class="card">
       <h3>Useful links</h3>
       <p><a href="/health">/health</a> (ops check)</p>
       <p><a href="/api/guidance">/api/guidance</a> (JSON for scripts/coworkers)</p>
@@ -54,7 +85,15 @@ HOME_TEMPLATE = """
 def home():
     title = os.environ.get("APP_TITLE", "Aviation Guidance")
     g = get_guidance_cached(ttl_seconds=int(os.environ.get("GUIDANCE_TTL", "300")))
-    return render_template_string(HOME_TEMPLATE, title=title, g=g)
+
+    stations_default = os.environ.get("METAR_STATIONS", "KMCI,KSTL,KMKC").split(",")
+    metars_raw = get_metars_cached(
+        stations=stations_default,
+        ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
+    )
+    metars = summarize_metars(metars_raw)
+
+    return render_template_string(HOME_TEMPLATE, title=title, g=g, metars=metars)
 
 @app.get("/health")
 def health():
@@ -74,6 +113,7 @@ def api_metars():
         ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
     )
     return jsonify(metars)
+
 
 
 
