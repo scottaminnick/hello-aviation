@@ -44,6 +44,7 @@ HOME_TEMPLATE = """
       <h3>Useful links</h3>
       <p><a href="/health">/health</a> (ops check)</p>
       <p><a href="/api/guidance">/api/guidance</a> (JSON for scripts/coworkers)</p>
+      <p><a href="/api/metars">/api/metars</a> (latest METAR JSON)</p>
     </div>
   </body>
 </html>
@@ -73,6 +74,7 @@ def api_metars():
         ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
     )
     return jsonify(metars)
+
 
 
 
