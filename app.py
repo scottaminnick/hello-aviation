@@ -1,6 +1,7 @@
 import os
 from flask import Flask, jsonify, render_template_string
 from guidance import get_guidance_cached
+from metar import 
 
 app = Flask(__name__)
 
@@ -62,3 +63,15 @@ def health():
 def api_guidance():
     g = get_guidance_cached(ttl_seconds=int(os.environ.get("GUIDANCE_TTL", "300")))
     return jsonify(g)
+
+@app.get("/api/metars")
+def api_metars():
+    # Default stations can be overridden by query string or env var later
+    stations_default = os.environ.get("METAR_STATIONS", "KMCI,KSTL,KMKC").split(",")
+    metars = get_metars_cached(
+        stations=stations_default,
+        ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
+    )
+    return jsonify(metars)
+
+
