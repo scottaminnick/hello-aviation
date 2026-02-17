@@ -1,0 +1,9 @@
+from datetime import datetime, timezone
+
+@app.get("/guidance")
+def guidance():
+    return {
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "product": "froude",
+        "status": "placeholder"
+    }
