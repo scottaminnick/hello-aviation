@@ -18,6 +18,9 @@ HOME_TEMPLATE = """
       .card { border: 1px solid #ddd; border-radius: 12px; padding: 1rem 1.2rem; margin: 1rem 0; }
       .muted { color: #666; }
       ul { margin: 0.4rem 0 0 1.2rem; }
+      .hi { font-weight: 700; }
+      .bad { font-weight: 700; text-transform: uppercase; }
+
     </style>
   </head>
   <body>
@@ -59,8 +62,8 @@ HOME_TEMPLATE = """
           <tr>
             <td><b>{{ m.icao }}</b></td>
             <td>{{ m.time_utc }}</td>
-            <td>{{ m.fltCat }}</td>
-            <td>{{ m.wind }}</td>
+            <td class="{% if m.fltCat in ['IFR','LIFR'] %}bad{% endif %}">{{ m.fltCat }}</td>
+            <td class="{% if m.wgst and m.wgst|int >= 25 %}hi{% endif %}">{{ m.wind }}</td>
             <td>{{ m.vis }}</td>
             <td>{{ m.ceiling }}</td>
             <td>{{ m.cover }}</td>
@@ -113,6 +116,7 @@ def api_metars():
         ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
     )
     return jsonify(metars)
+
 
 
 
