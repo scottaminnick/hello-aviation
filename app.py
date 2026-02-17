@@ -2,6 +2,7 @@ import os
 from flask import Flask, jsonify, render_template_string
 from guidance import get_guidance_cached
 from metar import get_metars_cached, summarize_metars
+from rap_point import get_rap_point_guidance_cached
 
 app = Flask(__name__)
 
@@ -79,6 +80,7 @@ HOME_TEMPLATE = """
       <p><a href="/health">/health</a> (ops check)</p>
       <p><a href="/api/guidance">/api/guidance</a> (JSON for scripts/coworkers)</p>
       <p><a href="/api/metars">/api/metars</a> (latest METAR JSON)</p>
+      <p><a href="/api/rap/points">/api/rap/points</a> (RAP point guidance)</p>
     </div>
   </body>
 </html>
@@ -116,6 +118,19 @@ def api_metars():
         ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
     )
     return jsonify(metars)
+
+@app.get("/api/rap/points")
+def api_rap_points():
+    stations_default = os.environ.get("RAP_STATIONS", "KMCI,KSTL,KMKC").split(",")
+    fxx_max = int(os.environ.get("RAP_FXX_MAX", "6"))
+    ttl = int(os.environ.get("RAP_TTL", "600"))
+
+    data = get_rap_point_guidance_cached(
+        stations=stations_default,
+        ttl_seconds=ttl,
+        fxx_max=fxx_max
+    )
+    return jsonify(data)
 
 
 
