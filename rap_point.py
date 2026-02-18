@@ -17,6 +17,37 @@ AIRPORTS = {
     "KSTL": (38.7525, -90.3734),
 }
 
+import xarray as xr
+
+def _as_dataset(obj):
+    """
+    Herbie.xarray() sometimes returns a Dataset, sometimes a list of Datasets.
+    This normalizes it to a single Dataset.
+    """
+    if isinstance(obj, xr.Dataset):
+        return obj
+
+    if isinstance(obj, list):
+        if len(obj) == 0:
+            raise ValueError("Herbie.xarray() returned an empty list (no fields matched).")
+
+        # If it's a list of Datasets, merge them
+        if all(isinstance(x, xr.Dataset) for x in obj):
+            return xr.merge(obj, compat="override", combine_attrs="override")
+
+        # If it's a list of DataArrays, convert then merge
+        if all(isinstance(x, xr.DataArray) for x in obj):
+            dsets = []
+            for i, da in enumerate(obj):
+                name = da.name or f"var_{i}"
+                dsets.append(da.to_dataset(name=name))
+            return xr.merge(dsets, compat="override", combine_attrs="override")
+
+        # Mixed types? Fall back to first element and hope it's a Dataset
+        return _as_dataset(obj[0])
+
+    raise TypeError(f"Unexpected xarray return type from Herbie: {type(obj)}")
+
 def _now_utc_hour_naive():
     # Herbie is happiest with naive datetimes representing UTC
     return datetime.utcnow().replace(minute=0, second=0, microsecond=0)
@@ -76,7 +107,9 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
                 H = Herbie(cycle, model="rap", product="awp130pgrb", fxx=fxx)
 
                 ds = H.xarray(":(UGRD|VGRD):(10 m above ground|925 mb):", remove_grib=True)
+                ds = _as_dataset(ds)
                 p = _ds_select_nearest(ds, lat, lon)
+
 
                 u10 = v10 = u925 = v925 = None
                 for name, da in p.data_vars.items():
