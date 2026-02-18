@@ -91,7 +91,7 @@ def home():
     title = os.environ.get("APP_TITLE", "Aviation Guidance")
     g = get_guidance_cached(ttl_seconds=int(os.environ.get("GUIDANCE_TTL", "300")))
 
-    stations_default = os.environ.get("METAR_STATIONS", "KMCI,KSTL,KMKC").split(",")
+    stations_default = [s.strip().upper() for s in os.environ.get("RAP_STATIONS", "KMCI,KSTL,KMKC").split(",") if s.strip()]
     metars_raw = get_metars_cached(
         stations=stations_default,
         ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
@@ -131,6 +131,7 @@ def api_rap_points():
         fxx_max=fxx_max
     )
     return jsonify(data)
+
 
 
 
