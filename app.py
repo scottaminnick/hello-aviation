@@ -122,7 +122,7 @@ def api_metars():
 
 @app.get("/api/rap/points")
 def api_rap_points():
-    stations_default = [s.strip().upper() for s in os.environ.get("RAP_STATIONS", "KMCI,KSTL,KMKC").split(",") if s.strip()]
+    stations_default = os.environ.get("RAP_STATIONS", "KMCI,KSTL,KMKC").split(",")
     fxx_max = int(os.environ.get("RAP_FXX_MAX", "6"))
     ttl = int(os.environ.get("RAP_TTL", "600"))
 
@@ -132,6 +132,8 @@ def api_rap_points():
         fxx_max=fxx_max
     )
     return jsonify(data)
+
+
 
 
 
