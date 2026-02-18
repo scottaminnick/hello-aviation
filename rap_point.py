@@ -66,20 +66,52 @@ def _find_latest_cycle(max_lookback_hours: int = 8) -> datetime:
 
 def _ds_select_nearest(ds, lat: float, lon: float):
     """
-    Robustly select nearest grid point regardless of coord naming.
+    Robust nearest-point selection for GRIB/xarray.
+    Handles:
+      - 1D indexed lat/lon (rare)
+      - 2D latitude/longitude grids (common with cfgrib)
+      - coords present but not indexable (your current error)
     """
-    # Common coord names
+    # 1) Try "nice" selection only if it actually works
     for yname, xname in [("latitude", "longitude"), ("lat", "lon")]:
         if yname in ds.coords and xname in ds.coords:
-            return ds.sel({yname: lat, xname: lon}, method="nearest")
-    # Some GRIB loads use 2D lat/lon; fallback: find nearest by brute force
-    if "latitude" in ds and "longitude" in ds:
-        lat2 = ds["latitude"].values
-        lon2 = ds["longitude"].values
-        d2 = (lat2 - lat) ** 2 + (lon2 - lon) ** 2
-        iy, ix = np.unravel_index(np.nanargmin(d2), d2.shape)
-        return ds.isel(y=iy, x=ix)
-    raise ValueError("Could not find lat/lon coordinates in dataset.")
+            try:
+                return ds.sel({yname: lat, xname: lon}, method="nearest")
+            except Exception:
+                # Not indexable (e.g., "no index found"), fall through to brute force
+                pass
+
+    # 2) Brute force using lat/lon arrays (works for 2D grids)
+    # Prefer the common GRIB names first
+    for yname, xname in [("latitude", "longitude"), ("lat", "lon")]:
+        if yname in ds and xname in ds:
+            lat_da = ds[yname]
+            lon_da = ds[xname]
+            break
+        if yname in ds.coords and xname in ds.coords:
+            lat_da = ds.coords[yname]
+            lon_da = ds.coords[xname]
+            break
+    else:
+        raise ValueError("Could not find lat/lon coordinates in dataset.")
+
+    lat2 = np.asarray(lat_da.values)
+    lon2 = np.asarray(lon_da.values)
+
+    # If lat/lon are 1D, expand to 2D grid
+    if lat2.ndim == 1 and lon2.ndim == 1:
+        lat2, lon2 = np.meshgrid(lat2, lon2, indexing="ij")
+
+    d2 = (lat2 - lat) ** 2 + (lon2 - lon) ** 2
+    iy, ix = np.unravel_index(np.nanargmin(d2), d2.shape)
+
+    # Use the dims attached to the lat field when possible (often ('y','x'))
+    if hasattr(lat_da, "dims") and len(lat_da.dims) >= 2:
+        ydim, xdim = lat_da.dims[:2]
+        return ds.isel({ydim: iy, xdim: ix})
+
+    # Fallback: assume y/x
+    return ds.isel(y=iy, x=ix)
 
 def _wind_speed(u, v):
     return float(np.sqrt(u*u + v*v))
