@@ -55,6 +55,8 @@ def _wind_speed(u, v):
 
 def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
     cycle = _find_latest_cycle()
+    cycle_aware = cycle.replace(tzinfo=timezone.utc)
+
     results = {}
     errors = {}
 
@@ -73,59 +75,50 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
             try:
                 H = Herbie(cycle, model="rap", product="awp", fxx=fxx)
 
-                # Pull only what we need: 10m wind and 925mb wind (good LL proxy)
-                # Regex selects u/v at those levels.
                 ds = H.xarray(":(UGRD|VGRD):(10 m above ground|925 mb):", remove_grib=True)
-
                 p = _ds_select_nearest(ds, lat, lon)
 
-                # Names depend on cfgrib; search variables by pattern
-                # Typical: u10 / v10 not guaranteed; so we locate by attrs.
                 u10 = v10 = u925 = v925 = None
                 for name, da in p.data_vars.items():
                     s = str(da.attrs)
                     if "10 m above ground" in s and "UGRD" in s:
-                        u10 = float(da.values)
+                        u10 = float(np.array(da.values).squeeze())
                     if "10 m above ground" in s and "VGRD" in s:
-                        v10 = float(da.values)
+                        v10 = float(np.array(da.values).squeeze())
                     if "925 mb" in s and "UGRD" in s:
-                        u925 = float(da.values)
+                        u925 = float(np.array(da.values).squeeze())
                     if "925 mb" in s and "VGRD" in s:
-                        v925 = float(da.values)
+                        v925 = float(np.array(da.values).squeeze())
 
                 if None in (u10, v10, u925, v925):
                     raise ValueError("Missing one or more required wind components in parsed data.")
 
                 spd10 = _wind_speed(u10, v10)
                 spd925 = _wind_speed(u925, v925)
-
-                # Simple low-level shear proxy (vector magnitude difference)
                 shear = _wind_speed(u925 - u10, v925 - v10)
 
+                valid = cycle + timedelta(hours=fxx)
                 valid_utc = valid.replace(tzinfo=timezone.utc).isoformat(timespec="minutes").replace("+00:00", "Z")
+
                 series.append({
                     "fxx": fxx,
-                    "valid_utc": valid.isoformat(timespec="minutes").replace("+00:00", "Z"),
+                    "valid_utc": valid_utc,
                     "wind10_kt": round(spd10 * 1.94384, 1),
                     "wind925_kt": round(spd925 * 1.94384, 1),
                     "shear_kt": round(shear * 1.94384, 1),
                 })
+
             except Exception as e:
                 errors.setdefault(stn, []).append(f"f{fxx:02d}: {e}")
 
-        results[stn] = {
-            "lat": lat,
-            "lon": lon,
-            "series": series
-        }
+        results[stn] = {"lat": lat, "lon": lon, "series": series}
 
     return {
         "model": "RAP",
         "product": "awp",
-        cycle_aware = cycle.replace(tzinfo=timezone.utc)
         "cycle_utc": cycle_aware.isoformat(timespec="minutes").replace("+00:00", "Z"),
         "fxx_max": fxx_max,
-        "stations": stations,
+        "stations": [s.strip().upper() for s in stations if s.strip()],
         "results": results,
         "errors": errors,
     }
