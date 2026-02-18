@@ -3,6 +3,7 @@ from flask import Flask, jsonify, render_template_string
 from guidance import get_guidance_cached
 from metar import get_metars_cached, summarize_metars
 from rap_point import get_rap_point_guidance_cached
+# (make sure rap_point.py defines this exact function name)
 
 app = Flask(__name__)
 
@@ -91,7 +92,7 @@ def home():
     title = os.environ.get("APP_TITLE", "Aviation Guidance")
     g = get_guidance_cached(ttl_seconds=int(os.environ.get("GUIDANCE_TTL", "300")))
 
-    stations_default = [s.strip().upper() for s in os.environ.get("RAP_STATIONS", "KMCI,KSTL,KMKC").split(",") if s.strip()]
+    stations_default = [s.strip().upper() for s in os.environ.get("METAR_STATIONS", "KMCI,KSTL,KMKC").split(",") if s.strip()]
     metars_raw = get_metars_cached(
         stations=stations_default,
         ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
@@ -112,7 +113,7 @@ def api_guidance():
 @app.get("/api/metars")
 def api_metars():
     # Default stations can be overridden by query string or env var later
-    stations_default = os.environ.get("METAR_STATIONS", "KMCI,KSTL,KMKC").split(",")
+    stations_default = [s.strip().upper() for s in os.environ.get("METAR_STATIONS", "KMCI,KSTL,KMKC").split(",") if s.strip()]
     metars = get_metars_cached(
         stations=stations_default,
         ttl_seconds=int(os.environ.get("METAR_TTL", "120"))
@@ -126,11 +127,13 @@ def api_rap_points():
     ttl = int(os.environ.get("RAP_TTL", "600"))
 
     data = get_rap_point_guidance_cached(
-        stations=stations_default,
-        ttl_seconds=ttl,
-        fxx_max=fxx_max
-    )
-    return jsonify(data)
+      stations=stations_default,
+      ttl_seconds=ttl,
+      fxx_max=fxx_max
+  )
+  return jsonify(data)
+
+
 
 
 
