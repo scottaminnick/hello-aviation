@@ -26,7 +26,7 @@ def _find_latest_cycle(max_lookback_hours: int = 8) -> datetime:
     for h in range(0, max_lookback_hours + 1):
         dt = base - timedelta(hours=h)
         try:
-            H = Herbie(dt, model="rap", product="awp", fxx=0)
+            H = Herbie(dt, model="rap", product="awp130pgrb", fxx=0)
             _ = H.inventory()
             return dt
         except Exception:
@@ -73,7 +73,7 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
 
         for fxx in range(0, fxx_max + 1):
             try:
-                H = Herbie(cycle, model="rap", product="awp", fxx=fxx)
+                H = Herbie(cycle, model="rap", product="awp130pgrb", fxx=fxx)
 
                 ds = H.xarray(":(UGRD|VGRD):(10 m above ground|925 mb):", remove_grib=True)
                 p = _ds_select_nearest(ds, lat, lon)
@@ -115,7 +115,7 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
 
     return {
         "model": "RAP",
-        "product": "awp",
+        "product": "awp130pgrb",
         "cycle_utc": cycle_aware.isoformat(timespec="minutes").replace("+00:00", "Z"),
         "fxx_max": fxx_max,
         "stations": [s.strip().upper() for s in stations if s.strip()],
