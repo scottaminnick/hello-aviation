@@ -7,7 +7,7 @@ import numpy as np
 # Herbie pulls model data from multiple sources and loads into xarray
 from herbie import Herbie
 
-_CACHE = {"ts": 0, "data": None}
+_CACHE = {"ts": 0, "data": None, "key": None}
 
 # Start with a small built-in airport list; expand later.
 # (You can also move this to a JSON file later.)
@@ -124,8 +124,13 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
     }
 
 def get_rap_point_guidance_cached(stations: list[str], ttl_seconds: int = 600, fxx_max: int = 6) -> dict:
+    key = (tuple([s.strip().upper() for s in stations if s.strip()]), int(fxx_max))
     now = time.time()
-    if _CACHE["data"] is None or (now - _CACHE["ts"]) > ttl_seconds:
-        _CACHE["data"] = fetch_rap_point_guidance(stations, fxx_max=fxx_max)
+
+    if _CACHE["data"] is None or _CACHE["key"] != key or (now - _CACHE["ts"]) > ttl_seconds:
+        _CACHE["data"] = fetch_rap_point_guidance(list(key[0]), fxx_max=key[1])
         _CACHE["ts"] = now
+        _CACHE["key"] = key
+
     return _CACHE["data"]
+
