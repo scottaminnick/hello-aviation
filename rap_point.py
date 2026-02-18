@@ -17,25 +17,21 @@ AIRPORTS = {
     "KSTL": (38.7525, -90.3734),
 }
 
-def _utc_now():
-    return datetime.now(timezone.utc)
+def _now_utc_hour_naive():
+    # Herbie is happiest with naive datetimes representing UTC
+    return datetime.utcnow().replace(minute=0, second=0, microsecond=0)
 
-def _find_latest_cycle(max_lookback_hours: int = 6) -> datetime:
-    """
-    RAP is hourly. We'll try now, then step back until a cycle exists.
-    """
-    now = _utc_now().replace(minute=0, second=0, microsecond=0)
+def _find_latest_cycle(max_lookback_hours: int = 8) -> datetime:
+    base = _now_utc_hour_naive()
     for h in range(0, max_lookback_hours + 1):
-        candidate = now - timedelta(hours=h)
+        dt = base - timedelta(hours=h)
         try:
-            # Lightweight existence check: instantiate and ask for inventory.
-            H = Herbie(candidate, model="rap", product="awp", fxx=0)
-            _ = H.inventory()  # will error if file not found
-            return candidate
+            H = Herbie(dt, model="rap", product="awp", fxx=0)
+            _ = H.inventory()
+            return dt
         except Exception:
             continue
-    # If all else fails, return current hour (downstream will error clearly)
-    return now
+    return base
 
 def _ds_select_nearest(ds, lat: float, lon: float):
     """
@@ -106,7 +102,7 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
                 # Simple low-level shear proxy (vector magnitude difference)
                 shear = _wind_speed(u925 - u10, v925 - v10)
 
-                valid = cycle + timedelta(hours=fxx)
+                valid_utc = valid.replace(tzinfo=timezone.utc).isoformat(timespec="minutes").replace("+00:00", "Z")
                 series.append({
                     "fxx": fxx,
                     "valid_utc": valid.isoformat(timespec="minutes").replace("+00:00", "Z"),
@@ -126,7 +122,8 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
     return {
         "model": "RAP",
         "product": "awp",
-        "cycle_utc": cycle.isoformat(timespec="minutes").replace("+00:00", "Z"),
+        cycle_aware = cycle.replace(tzinfo=timezone.utc)
+        "cycle_utc": cycle_aware.isoformat(timespec="minutes").replace("+00:00", "Z"),
         "fxx_max": fxx_max,
         "stations": stations,
         "results": results,
