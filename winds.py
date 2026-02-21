@@ -132,7 +132,7 @@ def fetch_hrrr_gusts(fxx: int = 0) -> dict:
         overwrite=False,
     )
 
-    raw = H.xarray(":GUST:10 m above ground:", remove_grib=True)
+    raw = H.xarray(":GUST:10 m above ground:", remove_grib=False)
     gust_da = _extract_gust_variable(raw)   # DataArray, m/s
 
     # HRRR uses 2-D latitude/longitude arrays on a Lambert Conformal grid.
