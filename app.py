@@ -133,6 +133,17 @@ def api_rap_points():
     )
     return jsonify(data)
 
+import traceback
+from flask import Response
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    tb = traceback.format_exc()
+    # Return text so you can read it in browser (and in Railway logs)
+    return Response(tb, mimetype="text/plain", status=500)
+
+
+
 
 
 
