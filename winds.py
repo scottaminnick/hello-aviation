@@ -133,7 +133,8 @@ def fetch_hrrr_gusts(fxx: int = 0) -> dict:
     )
 
     raw = H.xarray(":GUST:10 m above ground:", remove_grib=False)
-    gust_da = _extract_gust_variable(raw)   # DataArray, m/s
+    gust_da = _extract_gust_variable(raw)
+    gust_da = gust_da.load()  # force eager read into memory before subset file is cleaned up
 
     # HRRR uses 2-D latitude/longitude arrays on a Lambert Conformal grid.
     # They're stored as coordinate variables named 'latitude' and 'longitude'.
