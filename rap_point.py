@@ -48,7 +48,6 @@ def get_rap_point_guidance_cached(stations: list[str], ttl_seconds: int = 600, f
 
     return _CACHE["data"]
 
-
 def _pick_uv_at_level(point_ds: xr.Dataset, *, level_type: str, level: int):
     """
     Return (u, v) floats for the requested GRIB level.
@@ -75,6 +74,27 @@ def _pick_uv_at_level(point_ds: xr.Dataset, *, level_type: str, level: int):
 
     return u, v
 
+from datetime import datetime, timedelta
+
+def _now_utc_hour_naive():
+    # Herbie is happiest with naive datetimes representing UTC
+    return datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+
+def _find_latest_cycle(max_lookback_hours: int = 8) -> datetime:
+    """
+    Try RAP cycles from now backward until we find one with an inventory.
+    """
+    base = _now_utc_hour_naive()
+    for h in range(0, max_lookback_hours + 1):
+        dt = base - timedelta(hours=h)
+        try:
+            # Use a commonly-available RAP product to validate cycle existence
+            H = Herbie(dt, model="rap", product="wrfmsl", fxx=0)
+            _ = H.inventory()
+            return dt
+        except Exception:
+            continue
+    return base
 
 def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
     """
