@@ -1,12 +1,11 @@
 import os
 import time
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+
 import numpy as np
 import xarray as xr
-from datetime import datetime, timedelta, timezone
 from herbie import Herbie
-
-from pathlib import Path
-import os
 
 HERBIE_DIR = Path(os.environ.get("HERBIE_DATA_DIR", "/tmp/herbie"))
 HERBIE_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,12 +101,49 @@ def _find_latest_cycle(max_lookback_hours: int = 8) -> datetime:
         dt = base - timedelta(hours=h)
         try:
             # Use a commonly-available RAP product to validate cycle existence
-            H = Herbie(dt, model="rap", product="wrfmsl", fxx=0)
+            H = Herbie(dt, model="rap", product="wrfmsl", fxx=0, save_dir=str(HERBIE_DIR), overwrite=True)
             _ = H.inventory()
             return dt
         except Exception:
             continue
     return base
+
+def _ds_select_nearest(ds: xr.Dataset, lat: float, lon: float) -> xr.Dataset:
+    """
+    Select nearest grid point.
+    Handles:
+      - 1D coords named (latitude, longitude) or (lat, lon)
+      - 2D lat/lon grids
+    """
+    # 1D coordinate case
+    for yname, xname in [("latitude", "longitude"), ("lat", "lon")]:
+        if yname in ds.coords and xname in ds.coords:
+            try:
+                return ds.sel({yname: lat, xname: lon}, method="nearest")
+            except Exception:
+                # Some datasets have coords but no index; fall through to brute force
+                pass
+
+    # 2D coordinate case
+    if "latitude" in ds.variables and "longitude" in ds.variables:
+        lat2 = ds["latitude"].values
+        lon2 = ds["longitude"].values
+        d2 = (lat2 - lat) ** 2 + (lon2 - lon) ** 2
+        iy, ix = np.unravel_index(np.nanargmin(d2), d2.shape)
+
+        # Common RAP grids use y/x dims; if not, infer from lat2 shape
+        if "y" in ds.dims and "x" in ds.dims:
+            return ds.isel(y=iy, x=ix)
+
+        # Fallback: pick the last two dims
+        ydim, xdim = list(ds.dims)[-2], list(ds.dims)[-1]
+        return ds.isel({ydim: iy, xdim: ix})
+
+    raise ValueError("Could not find usable latitude/longitude coordinates in dataset.")
+
+
+def _wind_speed(u: float, v: float) -> float:
+    return float(np.sqrt(u * u + v * v))
 
 def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
     """
