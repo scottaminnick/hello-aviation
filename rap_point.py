@@ -177,13 +177,13 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
             try:
                 # --- 10m winds from wrfmsl ---
                 H10 = Herbie(cycle, model="rap", product="wrfmsl", fxx=fxx, save_dir=str(HERBIE_DIR), overwrite=True)
-                ds10 = _as_dataset(H10.xarray(":(UGRD|VGRD|u|v):10 m above ground:", remove_grib=True))
+                ds10 = _as_dataset(H10.xarray(remove_grib=True))
                 p10 = _ds_select_nearest(ds10, lat, lon)
                 u10, v10 = _pick_uv_at_level(p10, level_type="heightAboveGround", level=10)
 
                 # --- 925mb winds from wrfprs ---
                 H925 = Herbie(cycle, model="rap", product="wrfprs", fxx=fxx, save_dir=str(HERBIE_DIR), overwrite=True)
-                ds925 = _as_dataset(H925.xarray(":(UGRD|VGRD|u|v):925 mb:", remove_grib=True))
+                ds925 = _as_dataset(H925.xarray(remove_grib=True))
                 p925 = _ds_select_nearest(ds925, lat, lon)
                 u925, v925 = _pick_uv_at_level(p925, level_type="isobaricInhPa", level=925)
 
