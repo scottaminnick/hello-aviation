@@ -5,6 +5,13 @@ import xarray as xr
 from datetime import datetime, timedelta, timezone
 from herbie import Herbie
 
+# Start with a small built-in airport list; expand later.
+AIRPORTS = {
+    "KMCI": (39.2975, -94.7309),
+    "KMKC": (39.1279, -94.5892),
+    "KSTL": (38.7525, -90.3734),
+}
+
 def _as_dataset(obj):
     """
     Herbie.xarray() may return:
