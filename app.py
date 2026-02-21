@@ -411,6 +411,15 @@ def home():
 def health():
     return jsonify(status="ok")
 
+@app.get("/debug/routes")
+def debug_routes():
+    routes = [str(rule) for rule in app.url_map.iter_rules()]
+    return jsonify(sorted(routes))
+```
+
+Commit it, wait for Railway to redeploy, then visit:
+```
+https://your-railway-url.up.railway.app/debug/routes
 
 @app.get("/api/guidance")
 def api_guidance():
@@ -475,3 +484,4 @@ def api_winds_colorado():
 def handle_exception(e):
     tb = traceback.format_exc()
     return Response(tb, mimetype="text/plain", status=500)
+
