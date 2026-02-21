@@ -86,27 +86,111 @@ def _pick_uv_at_level(point_ds: xr.Dataset, *, level_type: str, level: int):
 
     return u, v
 
-from datetime import datetime, timedelta
-
 def _now_utc_hour_naive():
     # Herbie is happiest with naive datetimes representing UTC
     return datetime.utcnow().replace(minute=0, second=0, microsecond=0)
 
 def _find_latest_cycle(max_lookback_hours: int = 8) -> datetime:
     """
-    Try RAP cycles from now backward until we find one with an inventory.
+    Try RAP cycles from now backward until we find one that has inventory
+    for the SAME product we plan to use (awp130pgrb).
     """
     base = _now_utc_hour_naive()
     for h in range(0, max_lookback_hours + 1):
         dt = base - timedelta(hours=h)
         try:
-            # Use a commonly-available RAP product to validate cycle existence
-            H = Herbie(dt, model="rap", product="wrfmsl", fxx=0, save_dir=str(HERBIE_DIR), overwrite=True)
+            H = Herbie(
+                dt,
+                model="rap",
+                product="awp130pgrb",
+                fxx=0,
+                save_dir=str(HERBIE_DIR),
+                overwrite=True,
+            )
             _ = H.inventory()
             return dt
         except Exception:
             continue
     return base
+
+def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
+    """
+    For each station, return f00..fxx_max point time series of:
+      - 10m wind speed (kt)
+      - 925mb wind speed (kt)
+      - 10m->925mb vector shear magnitude (kt)
+
+    Uses RAP product: awp130pgrb
+    """
+    cycle = _find_latest_cycle()
+    cycle_aware = cycle.replace(tzinfo=timezone.utc)
+
+    results: dict = {}
+    errors: dict = {}
+
+    stations_clean = [s.strip().upper() for s in stations if s.strip()]
+
+    for stn in stations_clean:
+        if stn not in AIRPORTS:
+            errors[stn] = [f"Unknown station (not in AIRPORTS dict yet)."]
+            results[stn] = {"lat": None, "lon": None, "series": []}
+            continue
+
+        lat, lon = AIRPORTS[stn]
+        series = []
+
+        for fxx in range(0, fxx_max + 1):
+            try:
+                H = Herbie(
+                    cycle,
+                    model="rap",
+                    product="awp130pgrb",
+                    fxx=fxx,
+                    save_dir=str(HERBIE_DIR),
+                    overwrite=True,
+                )
+
+                ds = _as_dataset(H.xarray(remove_grib=True))
+                p = _ds_select_nearest(ds, lat, lon)
+
+                u10, v10 = _pick_uv_at_level(p, level_type="heightAboveGround", level=10)
+                u925, v925 = _pick_uv_at_level(p, level_type="isobaricInhPa", level=925)
+
+                if None in (u10, v10, u925, v925):
+                    raise ValueError(
+                        "Missing U/V at 10m and/or 925mb. "
+                        "Confirm GRIB attrs exist and levels are present in awp130pgrb."
+                    )
+
+                spd10 = _wind_speed(u10, v10)
+                spd925 = _wind_speed(u925, v925)
+                shear = _wind_speed(u925 - u10, v925 - v10)
+
+                valid = cycle + timedelta(hours=fxx)
+                valid_utc = valid.replace(tzinfo=timezone.utc).isoformat(timespec="minutes").replace("+00:00", "Z")
+
+                series.append({
+                    "fxx": fxx,
+                    "valid_utc": valid_utc,
+                    "wind10_kt": round(spd10 * 1.94384, 1),
+                    "wind925_kt": round(spd925 * 1.94384, 1),
+                    "shear_kt": round(shear * 1.94384, 1),
+                })
+
+            except Exception as e:
+                errors.setdefault(stn, []).append(f"f{fxx:02d}: {e}")
+
+        results[stn] = {"lat": lat, "lon": lon, "series": series}
+
+    return {
+        "model": "RAP",
+        "product": "awp130pgrb",
+        "cycle_utc": cycle_aware.isoformat(timespec="minutes").replace("+00:00", "Z"),
+        "fxx_max": fxx_max,
+        "stations": stations_clean,
+        "results": results,
+        "errors": errors,
+    }
 
 def _ds_select_nearest(ds: xr.Dataset, lat: float, lon: float) -> xr.Dataset:
     """
@@ -153,8 +237,8 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
       - 10m->925mb vector shear magnitude (kt)
 
     Uses RAP:
-      - wrfmsl product for 10m winds
-      - wrfprs product for pressure-level winds (925mb)
+      - awp130pgrb product for 10m winds
+      - awp130pgrb product for pressure-level winds (925mb)
     """
     cycle = _find_latest_cycle()
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
@@ -176,16 +260,13 @@ def fetch_rap_point_guidance(stations: list[str], fxx_max: int = 6) -> dict:
         for fxx in range(0, fxx_max + 1):
             try:
                 # --- 10m winds from wrfmsl ---
-                H10 = Herbie(cycle, model="rap", product="wrfmsl", fxx=fxx, save_dir=str(HERBIE_DIR), overwrite=True)
-                ds10 = _as_dataset(H10.xarray(remove_grib=True))
-                p10 = _ds_select_nearest(ds10, lat, lon)
-                u10, v10 = _pick_uv_at_level(p10, level_type="heightAboveGround", level=10)
+                H = Herbie(cycle, model="rap", product="awp130pgrb", fxx=fxx, save_dir=str(HERBIE_DIR), overwrite=True)
+                ds = _as_dataset(H.xarray(remove_grib=True))
+                p = _ds_select_nearest(ds, lat, lon)
 
-                # --- 925mb winds from wrfprs ---
-                H925 = Herbie(cycle, model="rap", product="wrfprs", fxx=fxx, save_dir=str(HERBIE_DIR), overwrite=True)
-                ds925 = _as_dataset(H925.xarray(remove_grib=True))
-                p925 = _ds_select_nearest(ds925, lat, lon)
-                u925, v925 = _pick_uv_at_level(p925, level_type="isobaricInhPa", level=925)
+                u10, v10 = _pick_uv_at_level(p, level_type="heightAboveGround", level=10)
+                u925, v925 = _pick_uv_at_level(p, level_type="isobaricInhPa", level=925)
+
 
                 if None in (u10, v10, u925, v925):
                     raise ValueError("Missing U/V at 10m and/or 925mb (check products/levels).")
