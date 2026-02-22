@@ -1,14 +1,14 @@
 """
 winds.py - HRRR Wind Gust fetcher for Colorado
 
-Uses Herbie's searchstring (byte-range) download to fetch ONLY the
-GUST:10 m above ground field (~KB instead of the full ~50 MB GRIB2).
-Immediately calls .load() to pull data into RAM before the temp file
-is released, avoiding lazy-read file-not-found errors.
+Strategy: use H.download(searchString=...) to byte-range download ONLY
+the GUST field into a stable file path, then open with cfgrib and
+immediately .load() into RAM before anything can delete the file.
 """
 
 import os
 import time
+import cfgrib
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -22,7 +22,6 @@ CO_LAT_MAX = 41.2
 CO_LON_MIN = -109.2
 CO_LON_MAX = -101.9
 
-# In-memory cache keyed by fxx
 _CACHE = {}
 
 
@@ -35,14 +34,8 @@ def _find_latest_hrrr_cycle(max_lookback_hours=6):
     for h in range(max_lookback_hours + 1):
         candidate = base - timedelta(hours=h)
         try:
-            H = Herbie(
-                candidate,
-                model="hrrr",
-                product="sfc",
-                fxx=0,
-                save_dir=str(HERBIE_DIR),
-                overwrite=False,
-            )
+            H = Herbie(candidate, model="hrrr", product="sfc", fxx=0,
+                       save_dir=str(HERBIE_DIR), overwrite=False)
             H.inventory()
             return candidate
         except Exception:
@@ -51,43 +44,40 @@ def _find_latest_hrrr_cycle(max_lookback_hours=6):
 
 
 def fetch_hrrr_gusts(fxx=1):
-    """
-    Fetch HRRR 10 m wind gust over Colorado using Herbie's byte-range
-    searchstring download -- grabs only the GUST field, not the full file.
-    """
     cycle = _find_latest_hrrr_cycle()
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
 
-    H = Herbie(
-        cycle,
-        model="hrrr",
-        product="sfc",
-        fxx=fxx,
-        save_dir=str(HERBIE_DIR),
-        overwrite=False,
+    H = Herbie(cycle, model="hrrr", product="sfc", fxx=fxx,
+               save_dir=str(HERBIE_DIR), overwrite=False)
+
+    # Download ONLY the gust bytes into a file we control.
+    # searchString does a byte-range request - tiny download vs full 50MB file.
+    grib_path = H.download(searchString=":GUST:10 m above ground:")
+
+    # grib_path may be a Path or a list of Paths - normalise
+    if isinstance(grib_path, list):
+        grib_path = grib_path[0]
+    grib_path = Path(grib_path)
+
+    if not grib_path.exists():
+        raise FileNotFoundError(f"Herbie download returned path that doesn't exist: {grib_path}")
+
+    # Open with cfgrib directly - no filter needed since file only has gust
+    datasets = cfgrib.open_datasets(
+        str(grib_path),
+        backend_kwargs={"indexpath": ""},
     )
 
-    # H.xarray() with a searchstring does a byte-range download of just
-    # the matching GRIB message -- much faster than the full file.
-    # remove_grib=False keeps the temp file alive while we call .load().
-    ds = H.xarray(":GUST:10 m above ground:", remove_grib=False)
+    if not datasets:
+        raise ValueError("cfgrib found no datasets in the downloaded gust GRIB file.")
 
-    # Herbie may return a Dataset or a list -- normalise to Dataset
-    if isinstance(ds, list):
-        if len(ds) == 0:
-            raise ValueError("Herbie returned empty list for GUST searchstring.")
-        import xarray as xr
-        ds = xr.merge(ds, compat="override")
+    ds = next((d for d in datasets if len(d.data_vars) > 0), None)
+    if ds is None:
+        raise ValueError("All datasets from gust GRIB were empty.")
 
-    # Find the gust variable (usually named 'gust' or 'si10')
-    vname = None
-    for name in ds.data_vars:
-        vname = name
-        break
-    if vname is None:
-        raise ValueError(f"No data variables in dataset. vars={list(ds.data_vars)}")
+    vname   = list(ds.data_vars)[0]
 
-    # Load into RAM immediately -- critical before temp file is released
+    # .load() pulls ALL data into RAM right now, while the file still exists
     gust_da = ds[vname].load()
 
     # Sanity check: surface gusts should be 0-100 m/s
@@ -96,16 +86,15 @@ def fetch_hrrr_gusts(fxx=1):
     if raw_max > 150 or raw_min < 0:
         raise ValueError(
             f"Gust values out of physical range "
-            f"(min={raw_min:.1f}, max={raw_max:.1f} m/s). Wrong field grabbed."
+            f"(min={raw_min:.1f}, max={raw_max:.1f} m/s). Wrong GRIB field."
         )
 
-    # Lat/lon - HRRR uses 2D Lambert Conformal grids
-    lat2d = gust_da.coords["latitude"].values
-    lon2d = gust_da.coords["longitude"].values
-    lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
+    lat2d    = gust_da.coords["latitude"].values
+    lon2d    = gust_da.coords["longitude"].values
+    lon2d    = np.where(lon2d > 180, lon2d - 360, lon2d)
     gust_arr = gust_da.values
 
-    # Clip to Colorado bounding box
+    # Clip to Colorado
     mask = (
         (lat2d >= CO_LAT_MIN) & (lat2d <= CO_LAT_MAX) &
         (lon2d >= CO_LON_MIN) & (lon2d <= CO_LON_MAX)
@@ -117,7 +106,6 @@ def fetch_hrrr_gusts(fxx=1):
     r0, r1 = rows.min(), rows.max() + 1
     c0, c1 = cols.min(), cols.max() + 1
 
-    # Downsample 2x (~6 km, ~7500 points for Leaflet performance)
     step    = 2
     lat_ds  = lat2d[r0:r1, c0:c1][::step, ::step]
     lon_ds  = lon2d[r0:r1, c0:c1][::step, ::step]
@@ -148,10 +136,6 @@ def fetch_hrrr_gusts(fxx=1):
 
 
 def get_hrrr_gusts_cached(fxx=1, ttl_seconds=600):
-    """
-    Cache wrapper keyed by fxx so different forecast hours don't collide.
-    Re-fetches at most every ttl_seconds (HRRR updates hourly, 600s is fine).
-    """
     now    = time.time()
     cached = _CACHE.get(fxx)
     if cached is None or (now - cached["ts"]) > ttl_seconds:
