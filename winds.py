@@ -108,21 +108,16 @@ def fetch_hrrr_gusts(fxx: int = 0) -> dict:
     Download HRRR surface wind gusts, clip to Colorado, and return a
     JSON-serialisable dict ready for the Leaflet map.
 
-    Parameters
-    ----------
-    fxx : forecast hour (0 = analysis/most current, up to 18)
-
-    Returns
-    -------
-    dict with keys:
-        model, cycle_utc, valid_utc, fxx, cell_size_deg,
-        point_count, points (list of {lat, lon, gust_kt})
+    Strategy: download the full GRIB2 file with H.download(), then open
+    it directly with cfgrib and filter for the gust variable ourselves.
+    This avoids Herbie's searchstring subsetting which creates a temporary
+    subset file that cfgrib tries to lazily reopen after Herbie deletes it.
     """
+    import cfgrib
+
     cycle = _find_latest_hrrr_cycle()
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
 
-    # searchString tells Herbie to extract ONLY the gust field from the
-    # GRIB2 file — much faster than loading every variable.
     H = Herbie(
         cycle,
         model="hrrr",
@@ -132,21 +127,49 @@ def fetch_hrrr_gusts(fxx: int = 0) -> dict:
         overwrite=False,
     )
 
-    raw = H.xarray(":GUST:10 m above ground:", remove_grib=False)
-    gust_da = _extract_gust_variable(raw)
-    gust_da = gust_da.load()  # force eager read into memory before subset file is cleaned up
+    # Download the full GRIB2 file and get its local path
+    local_path = H.download()
 
-    # HRRR uses 2-D latitude/longitude arrays on a Lambert Conformal grid.
-    # They're stored as coordinate variables named 'latitude' and 'longitude'.
+    # Open directly with cfgrib, filtering for gust at surface level.
+    # filter_by_keys limits which GRIB messages are read.
+    # We load eagerly (indexpath='') so everything goes into RAM immediately.
+    datasets = cfgrib.open_datasets(
+        str(local_path),
+        backend_kwargs={"indexpath": ""},
+        filter_by_keys={"shortName": "gust"},
+    )
+
+    if not datasets:
+        raise ValueError(
+            "No gust variable found in HRRR sfc file. "
+            "Check that shortName='gust' exists in this product."
+        )
+
+    # cfgrib may return multiple datasets; grab the first one with data
+    ds = datasets[0]
+
+    # Find the gust DataArray — it may be named 'gust', 'fg', or similar
+    gust_da = None
+    for vname, da in ds.data_vars.items():
+        gust_da = da
+        break
+
+    if gust_da is None:
+        raise ValueError(f"Could not find gust variable. Available: {list(ds.data_vars)}")
+
+    # Force all data into memory NOW while the file is still open
+    gust_da = gust_da.load()
+
+    # HRRR uses 2-D latitude/longitude arrays on a Lambert Conformal grid
     lat2d = gust_da.coords["latitude"].values   # shape (y, x)
     lon2d = gust_da.coords["longitude"].values  # shape (y, x), range 0-360
 
-    # Convert 0-360 → -180/+180 so we match normal geographic conventions
+    # Convert 0-360 to -180/+180
     lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
 
     gust_arr = gust_da.values  # shape (y, x), m/s
 
-    # ── Clip to Colorado ─────────────────────────────────────────────────────
+    # Clip to Colorado bounding box
     mask = (
         (lat2d >= CO_LAT_MIN) & (lat2d <= CO_LAT_MAX) &
         (lon2d >= CO_LON_MIN) & (lon2d <= CO_LON_MAX)
@@ -163,24 +186,17 @@ def fetch_hrrr_gusts(fxx: int = 0) -> dict:
 
     lat_co  = lat2d[r0:r1, c0:c1]
     lon_co  = lon2d[r0:r1, c0:c1]
-    gust_co = gust_arr[r0:r1, c0:c1]   # still m/s
+    gust_co = gust_arr[r0:r1, c0:c1]
 
-    # ── Convert m/s → knots ───────────────────────────────────────────────────
+    # Convert m/s to knots
     gust_kt = gust_co * 1.94384
 
-    # ── Downsample 2× in each direction ──────────────────────────────────────
-    # HRRR 3 km → effective 6 km, ~7,500 points instead of ~30,000.
-    # This keeps Leaflet fast while still resolving the major terrain features
-    # (Front Range, Sawatch, San Juans, etc.).
+    # Downsample 2x in each direction (~6 km effective, ~7500 points)
     step = 2
     lat_ds  = lat_co [::step, ::step]
     lon_ds  = lon_co [::step, ::step]
     gust_ds = gust_kt[::step, ::step]
 
-    # ── Build output list ─────────────────────────────────────────────────────
-    # cell_size_deg is the approximate width of each rendered rectangle in degrees.
-    # At 39°N, 6 km ≈ 0.054° latitude and ≈ 0.069° longitude.
-    # The Leaflet JS will use half this value on each side of the centre point.
     cell_size_deg = 0.055
 
     points = []
@@ -191,21 +207,21 @@ def fetch_hrrr_gusts(fxx: int = 0) -> dict:
             if np.isnan(g):
                 continue
             points.append({
-                "lat":     round(float(lat_ds[i, j]), 4),
-                "lon":     round(float(lon_ds[i, j]), 4),
-                "gust_kt": round(g, 1),
+                "lat":      round(float(lat_ds[i, j]), 4),
+                "lon":      round(float(lon_ds[i, j]), 4),
+                "gust_kt":  round(g, 1),
             })
 
     valid_dt = (cycle + timedelta(hours=fxx)).replace(tzinfo=timezone.utc)
 
     return {
-        "model":        "HRRR",
-        "cycle_utc":    cycle_aware.isoformat(timespec="minutes").replace("+00:00", "Z"),
-        "valid_utc":    valid_dt.isoformat(timespec="minutes").replace("+00:00", "Z"),
-        "fxx":          fxx,
+        "model":         "HRRR",
+        "cycle_utc":     cycle_aware.isoformat(timespec="minutes").replace("+00:00", "Z"),
+        "valid_utc":     valid_dt.isoformat(timespec="minutes").replace("+00:00", "Z"),
+        "fxx":           fxx,
         "cell_size_deg": cell_size_deg,
-        "point_count":  len(points),
-        "points":       points,
+        "point_count":   len(points),
+        "points":        points,
     }
 
 
