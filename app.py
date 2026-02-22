@@ -245,7 +245,16 @@ async function loadGusts(fxx) {
   try {
     const resp = await fetch('/api/winds/colorado?fxx=' + fxx);
     if (!resp.ok) {
-      const text = await resp.text();
+      const body = await resp.json().catch(() => null);
+      if (resp.status === 404 && body && body.error === 'not_available') {
+        overlay.classList.add('hidden');
+        errorEl.style.display = 'block';
+        errorEl.textContent = '⚠️ F' + String(fxx).padStart(2,'0') +
+          ' not yet available on AWS — try a lower forecast hour.';
+        slider.disabled = false;
+        return;
+      }
+      const text = body ? JSON.stringify(body) : await resp.text();
       throw new Error('Server ' + resp.status + ': ' + text.slice(0, 300));
     }
     const data = await resp.json();
@@ -416,10 +425,26 @@ def map_winds():
 
 @app.get("/api/winds/colorado")
 def api_winds_colorado():
-    fxx = int(request.args.get("fxx", 0))
+    fxx = int(request.args.get("fxx", 1))
     ttl = int(request.args.get("ttl", os.environ.get("WINDS_TTL", "600")))
-    data = get_hrrr_gusts_cached(fxx=fxx, ttl_seconds=ttl)
-    return jsonify(data)
+    try:
+        data = get_hrrr_gusts_cached(fxx=fxx, ttl_seconds=ttl)
+        return jsonify(data)
+    except Exception as e:
+        msg = str(e)
+        # Herbie raises various errors when a forecast hour isn't on S3 yet
+        not_ready = any(k in msg.lower() for k in [
+            "did not find", "not found", "no such file", "404", "unavailable"
+        ])
+        if not_ready:
+            return jsonify({
+                "error": "not_available",
+                "message": f"F{fxx:02d} is not yet available on AWS. "
+                           "HRRR files are published incrementally — "
+                           "try a lower forecast hour.",
+                "fxx": fxx,
+            }), 404
+        raise   # re-raise anything else so the 500 handler still catches it
 
 
 @app.errorhandler(Exception)
