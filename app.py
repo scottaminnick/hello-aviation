@@ -485,6 +485,57 @@ def debug_routes():
     return jsonify(sorted(routes))
 
 
+@app.get("/debug/prs_fields")
+def debug_prs_fields():
+    """
+    Dump ALL field names from the HRRR pressure-level (prs) product.
+    Used to confirm which fields are available for Froude number calculation:
+      - U/V wind components at pressure levels (for wind perpendicular to terrain)
+      - Temperature at multiple levels (for Brunt-Vaisala frequency / stability)
+      - Geopotential height (to convert pressure levels to meters)
+    """
+    import pygrib
+    from winds import _find_latest_hrrr_cycle, HERBIE_DIR
+    from herbie import Herbie
+    from pathlib import Path
+
+    cycle     = _find_latest_hrrr_cycle()
+    H         = Herbie(cycle, model="hrrr", product="prs", fxx=1,
+                       save_dir=str(HERBIE_DIR), overwrite=False)
+    grib_path = Path(H.download())
+
+    grbs      = pygrib.open(str(grib_path))
+    all_fields = []
+    for grb in grbs:
+        all_fields.append({
+            "name":        grb.name,
+            "shortName":   grb.shortName,
+            "typeOfLevel": grb.typeOfLevel,
+            "level":       grb.level,
+        })
+    grbs.close()
+
+    # Filter to just the fields relevant to Froude number
+    froude_keywords = ["wind", "temperature", "geopotential", "height",
+                       "u-component", "v-component", "u component", "v component"]
+    froude_fields = [
+        f for f in all_fields
+        if any(kw in f["name"].lower() for kw in froude_keywords)
+        and f["typeOfLevel"] == "isobaricInhPa"
+    ]
+
+    # Get unique pressure levels available
+    levels = sorted(set(f["level"] for f in froude_fields))
+
+    return jsonify({
+        "cycle":          cycle.isoformat(),
+        "grib_file":      grib_path.name,
+        "total_fields":   len(all_fields),
+        "pressure_levels_mb": levels,
+        "froude_relevant_fields": froude_fields,
+    })
+
+
 @app.get("/debug/grib_fields")
 def debug_grib_fields():
     """Dump gust-related field names from latest HRRR sfc F01 GRIB2."""
