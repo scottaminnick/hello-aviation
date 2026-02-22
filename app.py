@@ -4,7 +4,7 @@ from flask import Flask, jsonify, render_template_string, Response, request
 from guidance import get_guidance_cached
 from metar import get_metars_cached, summarize_metars
 from rap_point import get_rap_point_guidance_cached
-from winds import get_hrrr_gusts_cached
+from winds import get_hrrr_gusts_cached, get_cycle_status_cached
 
 app = Flask(__name__)
 
@@ -92,39 +92,70 @@ WINDS_MAP_TEMPLATE = """
     :root {
       --bg: #0d1117; --panel: #161b22; --border: #30363d;
       --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+      --green: #2ecc71; --yellow: #f1c40f; --orange: #e67e22; --red: #e74c3c;
     }
     html, body { height: 100%; background: var(--bg); color: var(--text); font-family: sans-serif; }
     header {
       display: flex; align-items: center; justify-content: space-between;
       padding: 0.5rem 1.2rem; background: var(--panel);
       border-bottom: 1px solid var(--border); gap: 1rem; flex-wrap: wrap;
+      min-height: 56px;
     }
     header h1 { font-size: 1rem; font-weight: 700; color: var(--accent); white-space: nowrap; }
     .subtitle { font-size: 0.8rem; color: var(--muted); margin-left: 0.5rem; }
+
+    /* ── Cycle selector ── */
+    #cycle-wrap {
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    #cycle-wrap label { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+    #cycle-select {
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer;
+    }
+
+    /* ── Progress bar ── */
+    #progress-wrap {
+      display: flex; align-items: center; gap: 0.5rem;
+      background: rgba(88,166,255,0.06); border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.3rem 0.75rem; min-width: 160px;
+    }
+    #progress-label { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+    #progress-bar-track {
+      flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
+    }
+    #progress-bar-fill {
+      height: 100%; width: 0%; border-radius: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--green));
+      transition: width 0.4s ease;
+    }
+    #progress-pct { font-size: 0.8rem; font-weight: 700; color: var(--accent); min-width: 2.5rem; }
+
+    /* ── Hour buttons ── */
+    #hours-wrap {
+      display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap;
+    }
+    #hours-wrap label { font-size: 0.72rem; color: var(--muted); white-space: nowrap; margin-right: 0.2rem; }
+    .hr-btn {
+      font-size: 0.7rem; font-weight: 600; padding: 0.2rem 0.4rem;
+      border-radius: 4px; border: 1px solid var(--border);
+      background: var(--panel); color: var(--muted);
+      cursor: not-allowed; opacity: 0.4; transition: all 0.15s;
+      min-width: 2rem; text-align: center;
+    }
+    .hr-btn.avail {
+      color: var(--text); opacity: 1; cursor: pointer;
+      border-color: #444;
+    }
+    .hr-btn.avail:hover { background: #2a3a4a; border-color: var(--accent); }
+    .hr-btn.active {
+      background: var(--accent); color: #0d1117;
+      border-color: var(--accent); cursor: default;
+    }
+
     #meta-strip { font-size: 0.72rem; color: var(--muted); display: flex; gap: 1.2rem; flex-wrap: wrap; }
     #meta-strip b { color: var(--text); }
-
-    /* ── Forecast hour slider ── */
-    #slider-wrap {
-      display: flex; align-items: center; gap: 0.6rem;
-      background: rgba(88,166,255,0.08); border: 1px solid var(--border);
-      border-radius: 6px; padding: 0.3rem 0.75rem;
-    }
-    #slider-wrap label { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
-    #fxx-slider {
-      -webkit-appearance: none; appearance: none;
-      width: 160px; height: 4px; border-radius: 2px;
-      background: var(--border); outline: none; cursor: pointer;
-    }
-    #fxx-slider::-webkit-slider-thumb {
-      -webkit-appearance: none; appearance: none;
-      width: 14px; height: 14px; border-radius: 50%;
-      background: var(--accent); cursor: pointer;
-    }
-    #fxx-label {
-      font-size: 0.8rem; font-weight: 700; color: var(--accent);
-      min-width: 2.8rem; text-align: right;
-    }
 
     .back-link {
       font-size: 0.8rem; color: var(--muted); text-decoration: none;
@@ -169,22 +200,33 @@ WINDS_MAP_TEMPLATE = """
 <header>
   <div style="display:flex; align-items:baseline; flex-shrink:0;">
     <h1>HRRR WIND GUSTS</h1>
-    <span class="subtitle">Colorado · 10 m AGL · Aviation scale</span>
+    <span class="subtitle">Colorado &middot; 10 m AGL &middot; Aviation scale</span>
   </div>
 
-  <!-- Forecast hour slider -->
-  <div id="slider-wrap">
-    <label for="fxx-slider">FCST HOUR</label>
-    <input type="range" id="fxx-slider" min="1" max="12" step="1" value="1" />
-    <span id="fxx-label">F01</span>
+  <!-- Cycle selector -->
+  <div id="cycle-wrap">
+    <label for="cycle-select">CYCLE</label>
+    <select id="cycle-select"><option>Loading...</option></select>
+  </div>
+
+  <!-- Progress bar -->
+  <div id="progress-wrap">
+    <span id="progress-label">AVAIL</span>
+    <div id="progress-bar-track"><div id="progress-bar-fill"></div></div>
+    <span id="progress-pct">--%</span>
+  </div>
+
+  <!-- Forecast hour buttons -->
+  <div id="hours-wrap">
+    <label>FCST HOUR</label>
+    <!-- Buttons injected by JS -->
   </div>
 
   <div id="meta-strip">
-    <span>CYCLE <b id="m-cycle">--</b></span>
     <span>VALID <b id="m-valid">--</b></span>
     <span>PTS <b id="m-pts">--</b></span>
   </div>
-  <a class="back-link" href="/">Back to Home</a>
+  <a class="back-link" href="/">&#8592; Home</a>
 </header>
 
 <div id="map"></div>
@@ -199,13 +241,28 @@ WINDS_MAP_TEMPLATE = """
 
 <div id="loading-overlay">
   <div class="spinner"></div>
-  <div id="load-status">Fetching HRRR F01 data... first load may take 30–60 s</div>
+  <div id="load-status">Checking HRRR availability...</div>
 </div>
 
 <div id="error-banner"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
+// ── State ────────────────────────────────────────────────────────────────────
+let gustLayer    = null;
+let cycleStatus  = null;   // full status response from /api/winds/status
+let activeCycle  = null;   // currently selected cycle_utc string
+let activeFxx    = 1;
+
+// ── Map setup ────────────────────────────────────────────────────────────────
+const map = L.map('map', {
+  center: [39.0, -105.5], zoom: 7,
+  renderer: L.canvas(), preferCanvas: true,
+});
+L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+  attribution: 'Map: OpenTopoMap', maxZoom: 11,
+}).addTo(map);
+
 function gustColor(kt) {
   if (kt >= 50) return '#e74c3c';
   if (kt >= 35) return '#e67e22';
@@ -213,63 +270,120 @@ function gustColor(kt) {
   return '#2ecc71';
 }
 
-const map = L.map('map', {
-  center: [39.0, -105.5],
-  zoom: 7,
-  renderer: L.canvas(),
-  preferCanvas: true,
+// ── Status / availability ────────────────────────────────────────────────────
+async function fetchStatus() {
+  const resp = await fetch('/api/winds/status');
+  if (!resp.ok) throw new Error('Status fetch failed: ' + resp.status);
+  return resp.json();
+}
+
+function applyStatus(status) {
+  cycleStatus = status;
+
+  // Populate cycle dropdown
+  const sel = document.getElementById('cycle-select');
+  sel.innerHTML = '';
+  status.cycles.forEach(function(c, idx) {
+    const opt    = document.createElement('option');
+    opt.value    = c.cycle_utc;
+    opt.textContent = c.cycle_utc + '  (' + c.pct_complete + '% complete)';
+    if (idx === 0) opt.selected = true;
+    sel.appendChild(opt);
+  });
+
+  // Show the current cycle's availability
+  updateProgressAndButtons(status.cycles[0]);
+
+  if (!activeCycle) activeCycle = status.cycles[0].cycle_utc;
+}
+
+function updateProgressAndButtons(cycleData) {
+  // Progress bar
+  document.getElementById('progress-bar-fill').style.width = cycleData.pct_complete + '%';
+  document.getElementById('progress-pct').textContent      = cycleData.pct_complete + '%';
+
+  // Hour buttons (F01-F12)
+  const wrap = document.getElementById('hours-wrap');
+  // Remove old buttons but keep the label
+  wrap.querySelectorAll('.hr-btn').forEach(function(b) { b.remove(); });
+
+  for (var fxx = 1; fxx <= 12; fxx++) {
+    const btn     = document.createElement('button');
+    btn.className = 'hr-btn';
+    btn.textContent = 'F' + String(fxx).padStart(2, '0');
+    btn.dataset.fxx = fxx;
+
+    const avail = cycleData.available_hours.includes(fxx);
+    if (avail) {
+      btn.classList.add('avail');
+      btn.addEventListener('click', onHourClick);
+    }
+    if (fxx === activeFxx) btn.classList.add('active');
+    wrap.appendChild(btn);
+  }
+}
+
+function setActiveButton(fxx) {
+  document.querySelectorAll('.hr-btn').forEach(function(b) {
+    b.classList.toggle('active', parseInt(b.dataset.fxx) === fxx);
+  });
+}
+
+function onHourClick(e) {
+  const fxx = parseInt(e.target.dataset.fxx);
+  if (fxx === activeFxx) return;
+  activeFxx = fxx;
+  setActiveButton(fxx);
+  loadGusts(activeCycle, fxx);
+}
+
+// Cycle dropdown change
+document.getElementById('cycle-select').addEventListener('change', function() {
+  activeCycle = this.value;
+  // Update progress bar for the newly selected cycle
+  const cycleData = cycleStatus.cycles.find(function(c) { return c.cycle_utc === activeCycle; });
+  if (cycleData) updateProgressAndButtons(cycleData);
+  // Load the first available hour for this cycle
+  if (cycleData && cycleData.available_hours.length > 0) {
+    activeFxx = cycleData.available_hours[0];
+    setActiveButton(activeFxx);
+    loadGusts(activeCycle, activeFxx);
+  }
 });
 
-L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-  attribution: 'Map: OpenTopoMap',
-  maxZoom: 11,
-}).addTo(map);
-
-// Track the current gust layer group so we can clear it on slider change
-let gustLayer = null;
-
-async function loadGusts(fxx) {
+// ── Gust data loader ─────────────────────────────────────────────────────────
+async function loadGusts(cycle_utc, fxx) {
   const overlay  = document.getElementById('loading-overlay');
   const statusEl = document.getElementById('load-status');
   const errorEl  = document.getElementById('error-banner');
 
-  // Show overlay for every load (not just the first)
   overlay.classList.remove('hidden');
-  statusEl.textContent = 'Fetching HRRR F0' + fxx + ' data...';
+  statusEl.textContent = 'Fetching HRRR ' + cycle_utc + ' F' + String(fxx).padStart(2,'0') + '...';
   errorEl.style.display = 'none';
 
-  // Disable slider while loading to prevent queuing multiple requests
-  const slider = document.getElementById('fxx-slider');
-  slider.disabled = true;
-
   try {
-    const resp = await fetch('/api/winds/colorado?fxx=' + fxx);
+    const url  = '/api/winds/colorado?fxx=' + fxx + '&cycle_utc=' + encodeURIComponent(cycle_utc);
+    const resp = await fetch(url);
+
     if (!resp.ok) {
-      const body = await resp.json().catch(() => null);
+      const body = await resp.json().catch(function() { return null; });
       if (resp.status === 404 && body && body.error === 'not_available') {
         overlay.classList.add('hidden');
         errorEl.style.display = 'block';
-        errorEl.textContent = '⚠️ F' + String(fxx).padStart(2,'0') +
-          ' not yet available on AWS — try a lower forecast hour.';
-        slider.disabled = false;
+        errorEl.textContent = '\u26a0\ufe0f F' + String(fxx).padStart(2,'0') +
+          ' not yet available \u2014 try a lower forecast hour.';
         return;
       }
-      const text = body ? JSON.stringify(body) : await resp.text();
-      throw new Error('Server ' + resp.status + ': ' + text.slice(0, 300));
+      throw new Error('Server ' + resp.status);
     }
-    const data = await resp.json();
 
-    document.getElementById('m-cycle').textContent = data.cycle_utc;
+    const data = await resp.json();
     document.getElementById('m-valid').textContent = data.valid_utc;
     document.getElementById('m-pts').textContent   = data.point_count.toLocaleString();
 
     statusEl.textContent = 'Rendering ' + data.point_count.toLocaleString() + ' cells...';
 
-    // Clear previous layer
-    if (gustLayer) {
-      map.removeLayer(gustLayer);
-      gustLayer = null;
-    }
+    if (gustLayer) { map.removeLayer(gustLayer); gustLayer = null; }
 
     const halfLat  = data.cell_size_deg / 2;
     const halfLon  = data.cell_size_deg * 1.25;
@@ -277,18 +391,11 @@ async function loadGusts(fxx) {
     const rects    = [];
 
     data.points.forEach(function(p) {
-      var bounds = [
-        [p.lat - halfLat, p.lon - halfLon],
-        [p.lat + halfLat, p.lon + halfLon],
-      ];
       var color = gustColor(p.gust_kt);
-      var rect  = L.rectangle(bounds, {
-        renderer:    renderer,
-        color:       color,
-        fillColor:   color,
-        fillOpacity: 0.60,
-        weight:      0,
-      });
+      var rect  = L.rectangle(
+        [[p.lat - halfLat, p.lon - halfLon], [p.lat + halfLat, p.lon + halfLon]],
+        { renderer: renderer, color: color, fillColor: color, fillOpacity: 0.60, weight: 0 }
+      );
       rect.bindPopup(
         '<b>' + p.gust_kt.toFixed(0) + ' kt</b><br>' +
         p.lat.toFixed(3) + '\u00b0N, ' + Math.abs(p.lon).toFixed(3) + '\u00b0W',
@@ -303,29 +410,51 @@ async function loadGusts(fxx) {
   } catch (err) {
     overlay.classList.add('hidden');
     errorEl.style.display = 'block';
-    errorEl.textContent = 'Error: ' + err.message;
+    errorEl.textContent   = 'Error: ' + err.message;
     console.error(err);
-  } finally {
-    slider.disabled = false;
   }
 }
 
-// Slider wiring
-const slider   = document.getElementById('fxx-slider');
-const fxxLabel = document.getElementById('fxx-label');
+// ── Init + auto-refresh ───────────────────────────────────────────────────────
+async function init() {
+  try {
+    const status = await fetchStatus();
+    applyStatus(status);
 
-slider.addEventListener('input', function() {
-  var val = parseInt(this.value);
-  fxxLabel.textContent = 'F' + String(val).padStart(2, '0');
-});
+    // Load first available hour from latest cycle
+    const latest = status.cycles[0];
+    activeCycle  = latest.cycle_utc;
+    if (latest.available_hours.length > 0) {
+      activeFxx = latest.available_hours[0];
+      setActiveButton(activeFxx);
+      loadGusts(activeCycle, activeFxx);
+    } else {
+      // Latest cycle has nothing yet; try previous
+      const prev = status.cycles[1];
+      if (prev && prev.available_hours.length > 0) {
+        activeCycle = prev.cycle_utc;
+        document.getElementById('cycle-select').value = activeCycle;
+        updateProgressAndButtons(prev);
+        activeFxx = prev.available_hours[0];
+        setActiveButton(activeFxx);
+        loadGusts(activeCycle, activeFxx);
+      }
+    }
+  } catch (err) {
+    document.getElementById('load-status').textContent = 'Status check failed: ' + err.message;
+    console.error(err);
+  }
+}
 
-// Load on slider release (mouseup / touchend) to avoid firing mid-drag
-slider.addEventListener('change', function() {
-  loadGusts(parseInt(this.value));
-});
+// Refresh status every 5 minutes (new hours come online as HRRR publishes)
+setInterval(async function() {
+  try {
+    const status = await fetchStatus();
+    applyStatus(status);
+  } catch (e) { /* silent - don't disrupt active use */ }
+}, 5 * 60 * 1000);
 
-// Initial load at F01 (F00 analysis hour has unreliable gust values in HRRR)
-loadGusts(1);
+init();
 </script>
 </body>
 </html>
@@ -423,28 +552,41 @@ def map_winds():
     return render_template_string(WINDS_MAP_TEMPLATE)
 
 
+@app.get("/api/winds/status")
+def api_winds_status():
+    """Return availability of F01-F12 for the latest two HRRR cycles."""
+    ttl  = int(os.environ.get("STATUS_TTL", "300"))
+    data = get_cycle_status_cached(ttl_seconds=ttl)
+    return jsonify(data)
+
+
 @app.get("/api/winds/colorado")
 def api_winds_colorado():
-    fxx = int(request.args.get("fxx", 1))
-    ttl = int(request.args.get("ttl", os.environ.get("WINDS_TTL", "600")))
+    fxx       = int(request.args.get("fxx", 1))
+    cycle_utc = request.args.get("cycle_utc")   # e.g. "2026-02-22T01:00Z"
+    ttl       = int(request.args.get("ttl", os.environ.get("WINDS_TTL", "600")))
+
+    # If no cycle specified, use the latest available
+    if not cycle_utc:
+        status    = get_cycle_status_cached(ttl_seconds=300)
+        cycle_utc = status["cycles"][0]["cycle_utc"]
+
     try:
-        data = get_hrrr_gusts_cached(fxx=fxx, ttl_seconds=ttl)
+        data = get_hrrr_gusts_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=ttl)
         return jsonify(data)
     except Exception as e:
         msg = str(e)
-        # Herbie raises various errors when a forecast hour isn't on S3 yet
         not_ready = any(k in msg.lower() for k in [
             "did not find", "not found", "no such file", "404", "unavailable"
         ])
         if not_ready:
             return jsonify({
                 "error": "not_available",
-                "message": f"F{fxx:02d} is not yet available on AWS. "
-                           "HRRR files are published incrementally — "
-                           "try a lower forecast hour.",
+                "message": f"F{fxx:02d} for cycle {cycle_utc} is not yet available on AWS.",
                 "fxx": fxx,
+                "cycle_utc": cycle_utc,
             }), 404
-        raise   # re-raise anything else so the 500 handler still catches it
+        raise
 
 
 @app.errorhandler(Exception)
