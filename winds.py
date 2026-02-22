@@ -1,8 +1,9 @@
 """
 winds.py - HRRR Wind Gust fetcher for Colorado
+Uses pygrib for synchronous GRIB2 reading (no lazy loading race conditions).
 
-Uses pygrib instead of cfgrib. pygrib reads GRIB2 synchronously —
-no lazy loading, no race conditions with temp files, much simpler API.
+Field confirmed via /debug/grib_fields:
+  name="Wind speed (gust)", typeOfLevel="surface", level=0
 """
 
 import os
@@ -46,7 +47,6 @@ def fetch_hrrr_gusts(fxx=1):
     cycle = _find_latest_hrrr_cycle()
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
 
-    # Download the full sfc GRIB2 to a stable persistent path
     H = Herbie(cycle, model="hrrr", product="sfc", fxx=fxx,
                save_dir=str(HERBIE_DIR), overwrite=False)
     grib_path = Path(H.download())
@@ -54,28 +54,19 @@ def fetch_hrrr_gusts(fxx=1):
     if not grib_path.exists():
         raise FileNotFoundError(f"GRIB2 file not found after download: {grib_path}")
 
-    # pygrib reads synchronously - no lazy loading, no race conditions
+    # pygrib reads synchronously - no lazy loading, no race conditions.
+    # Field confirmed: typeOfLevel="surface", level=0 (NOT heightAboveGround/10)
     grbs = pygrib.open(str(grib_path))
-
-    # Select the 10 m wind gust field
-    # pygrib.select() raises ValueError if nothing matches
     try:
-        msgs = grbs.select(name="Wind speed (gust)", typeOfLevel="heightAboveGround", level=10)
+        msgs = grbs.select(name="Wind speed (gust)", typeOfLevel="surface", level=0)
     except ValueError:
-        # Try a broader search if the exact name doesn't match
-        try:
-            msgs = grbs.select(shortName="gust", typeOfLevel="heightAboveGround", level=10)
-        except ValueError:
-            grbs.close()
-            raise ValueError(
-                "Could not find 'Wind speed (gust)' at 10 m above ground in HRRR sfc file. "
-                "Check pygrib field names with grbs.read() to debug."
-            )
+        grbs.close()
+        raise ValueError(
+            "Could not find 'Wind speed (gust)' at surface/level=0 in HRRR sfc file."
+        )
 
-    msg = msgs[0]
-
-    # .values reads the full array into RAM immediately - synchronous, safe
-    gust_arr, lat2d, lon2d = msg.data()
+    # .data() returns (values_array, lat_2d, lon_2d) - all in RAM immediately
+    gust_arr, lat2d, lon2d = msgs[0].data()
     grbs.close()
 
     # HRRR longitudes are 0-360, convert to -180/+180
