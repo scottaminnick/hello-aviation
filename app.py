@@ -347,6 +347,42 @@ def debug_routes():
     return jsonify(sorted(routes))
 
 
+@app.get("/debug/grib_fields")
+def debug_grib_fields():
+    """Dump gust-related field names from latest HRRR sfc F01 GRIB2."""
+    import pygrib
+    from winds import _find_latest_hrrr_cycle, HERBIE_DIR
+    from herbie import Herbie
+    from pathlib import Path
+
+    cycle = _find_latest_hrrr_cycle()
+    H = Herbie(cycle, model="hrrr", product="sfc", fxx=1,
+               save_dir=str(HERBIE_DIR), overwrite=False)
+    grib_path = Path(H.download())
+
+    grbs = pygrib.open(str(grib_path))
+    all_fields = []
+    for grb in grbs:
+        all_fields.append({
+            "name":        grb.name,
+            "shortName":   grb.shortName,
+            "typeOfLevel": grb.typeOfLevel,
+            "level":       grb.level,
+            "stepType":    grb.stepType,
+        })
+    grbs.close()
+
+    gust_fields = [f for f in all_fields
+                   if "gust" in f["name"].lower() or f["shortName"] == "gust"]
+
+    return jsonify({
+        "cycle":        cycle.isoformat(),
+        "grib_file":    grib_path.name,
+        "total_fields": len(all_fields),
+        "gust_fields":  gust_fields,
+    })
+
+
 @app.get("/api/guidance")
 def api_guidance():
     g = get_guidance_cached(ttl_seconds=int(os.environ.get("GUIDANCE_TTL", "300")))
