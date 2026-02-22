@@ -1,25 +1,16 @@
 """
 virga.py  –  HRRR-based Virga Potential calculator for Colorado
 ===============================================================
-Memory-efficient rewrite: uses pygrib.select() per field and clips
-to Colorado immediately, so we never hold more than ~2 MB in RAM
-at once instead of the full ~480 MB grid.
+Single-pass pygrib read: iterate the file ONCE, clip each field
+to Colorado immediately, discard the full grid.  O(708) reads
+instead of O(708 × 60) from repeated select() calls.
 
-Science (unchanged from original script)
------------------------------------------
-1. UPPER SATURATED LAYER  (700–500 mb)
-   Scan every 200 mb window for mean RH ≥ 80%.
-   Only show virga where an upper cloud layer is present.
-
-2. RH DECREASE IN COLUMN  (850–500 mb)
-   For each level, compute the 100 mb RH decrease (drying with height).
-   Track the maximum decrease and which level it occurred at.
-
-3. CLOUD BASE WIND
-   At the level of maximum RH decrease, record the 50 mb mean wind
-   speed (kt) as a proxy for virga shaft momentum.
-
-RH computed from T and Td via August-Roche-Magnus approximation.
+Science
+-------
+1. Upper saturated layer (700-500 mb): mean RH >= 80% over 200 mb depth
+2. Max 100 mb RH decrease in column (850-500 mb): evaporation zone
+3. Cloud base wind at level of max decrease (kt): virga shaft momentum
+RH computed from T + Td via August-Roche-Magnus approximation.
 """
 
 import os
@@ -36,11 +27,20 @@ HERBIE_DIR.mkdir(parents=True, exist_ok=True)
 CO_LAT_MIN, CO_LAT_MAX = 36.8, 41.2
 CO_LON_MIN, CO_LON_MAX = -109.2, -101.9
 
-# Only the levels we actually need — 500 to 850 mb at 25 mb spacing
-LEVELS_MB = [500, 525, 550, 575, 600, 625, 650, 675,
-             700, 725, 750, 775, 800, 825, 850]
+# Levels we care about: 500-850 mb at 25 mb spacing
+LEVELS_SET = frozenset([500,525,550,575,600,625,650,675,
+                        700,725,750,775,800,825,850])
+LEVELS_MB  = sorted(LEVELS_SET)   # ascending  (500→850)
 
-_CACHE = {}
+WANTED_NAMES = frozenset([
+    "Temperature",
+    "Dew point temperature",
+    "U component of wind",
+    "V component of wind",
+])
+
+_CACHE    = {}
+_CLIP_IDX = {}   # cache slice indices by grid shape
 
 
 # ── Herbie helpers ────────────────────────────────────────────────────────────
@@ -72,13 +72,9 @@ def _download(cycle, fxx):
     return p
 
 
-# ── Clipping helper ───────────────────────────────────────────────────────────
-
-_CLIP_IDX = {}   # cache the slice indices after first call
-
+# ── Clip helpers ──────────────────────────────────────────────────────────────
 
 def _get_clip_idx(lat2d, lon2d, step=2):
-    """Compute and cache the row/col slice for Colorado."""
     key = lat2d.shape
     if key not in _CLIP_IDX:
         mask = (
@@ -87,7 +83,7 @@ def _get_clip_idx(lat2d, lon2d, step=2):
         )
         rows, cols = np.where(mask)
         if len(rows) == 0:
-            raise ValueError("No grid points inside Colorado bounding box.")
+            raise ValueError("No HRRR grid points inside Colorado bounding box.")
         _CLIP_IDX[key] = (rows.min(), rows.max() + 1,
                           cols.min(), cols.max() + 1, step)
     return _CLIP_IDX[key]
@@ -101,7 +97,6 @@ def _clip(arr, idx):
 # ── Physics ───────────────────────────────────────────────────────────────────
 
 def _rh(T_K, Td_K):
-    """RH (0-100%) from temperature and dewpoint in Kelvin."""
     T_C  = T_K  - 273.15
     Td_C = Td_K - 273.15
     e_T  = 6.112 * np.exp(17.67 * T_C  / (T_C  + 243.5))
@@ -118,22 +113,69 @@ def _virga_category(pct):
     return cat
 
 
-# ── Memory-efficient field reader ─────────────────────────────────────────────
+# ── Single-pass GRIB reader ───────────────────────────────────────────────────
 
-def _read_field_clipped(grbs, name, level, idx):
+def _read_all_fields_clipped(prs_path):
     """
-    Select a single field by name+level, read it, clip to Colorado,
-    and return the small clipped array.  Never holds the full grid.
+    ONE pass through the GRIB2 file.
+    For each message: check level + name, read data, clip to Colorado,
+    store the small (~0.1 MB) clipped array.  Discard full grid immediately.
+
+    Returns:
+        lat_co, lon_co  : clipped coordinate arrays
+        T_co, Td_co     : dicts  level_mb -> clipped array (K)
+        U_co, V_co      : dicts  level_mb -> clipped array (m/s)
     """
-    try:
-        msgs = grbs.select(name=name, typeOfLevel="isobaricInhPa", level=level)
-    except ValueError:
-        raise ValueError(f"Field not found: '{name}' at {level} mb")
-    data, lat2d, lon2d = msgs[0].data()
-    lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
-    if idx is None:
-        idx = _get_clip_idx(lat2d, lon2d)
-    return _clip(data, idx), lat2d, lon2d, idx
+    T_co  = {}
+    Td_co = {}
+    U_co  = {}
+    V_co  = {}
+    lat_co = lon_co = None
+    idx    = None
+
+    grbs = pygrib.open(str(prs_path))
+
+    for grb in grbs:
+        # Fast pre-filter — skip irrelevant levels and variable names
+        if grb.typeOfLevel != "isobaricInhPa":
+            continue
+        lev = grb.level
+        if lev not in LEVELS_SET:
+            continue
+        name = grb.name
+        if name not in WANTED_NAMES:
+            continue
+
+        # Read full grid, compute clip indices on first encounter
+        data, lat2d, lon2d = grb.data()
+        lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
+
+        if idx is None:
+            idx    = _get_clip_idx(lat2d, lon2d)
+            r0, r1, c0, c1, step = idx
+            lat_co = lat2d[r0:r1, c0:c1][::step, ::step]
+            lon_co = lon2d[r0:r1, c0:c1][::step, ::step]
+
+        small = _clip(data, idx)
+        del data, lat2d, lon2d   # free full grid immediately
+
+        if name == "Temperature":
+            T_co[lev]  = small
+        elif name == "Dew point temperature":
+            Td_co[lev] = small
+        elif name == "U component of wind":
+            U_co[lev]  = small
+        elif name == "V component of wind":
+            V_co[lev]  = small
+
+    grbs.close()
+
+    # Validate we got everything
+    missing = [lev for lev in LEVELS_MB if lev not in T_co or lev not in Td_co]
+    if missing:
+        raise ValueError(f"Missing T/Td at levels: {missing}")
+
+    return lat_co, lon_co, T_co, Td_co, U_co, V_co
 
 
 # ── Main fetch ────────────────────────────────────────────────────────────────
@@ -146,64 +188,30 @@ def fetch_virga(cycle_utc: str, fxx: int = 1) -> dict:
 
     prs_path = _download(cycle, fxx)
 
-    grbs = pygrib.open(str(prs_path))
+    lat_co, lon_co, T_co, Td_co, U_co, V_co = _read_all_fields_clipped(prs_path)
+    shape = lat_co.shape
 
-    # ── Pass 1: read T and Td at each level, compute RH, discard raw arrays ──
-    # Maximum memory at any point: 2 full grids (T + Td) + 1 clipped RH array
-    # Full grid ~8 MB each → peak ~16 MB instead of ~480 MB
+    # Pre-compute clipped RH at each level
+    rh_co = {lev: _rh(T_co[lev], Td_co[lev]) for lev in LEVELS_MB}
+    del T_co, Td_co   # no longer needed
 
-    lat2d = lon2d = None
-    idx   = None
-
-    # Dictionaries of CLIPPED arrays only (~0.1 MB each)
-    rh_co = {}   # level -> clipped RH (%)
-    U_co  = {}   # level -> clipped U (m/s)
-    V_co  = {}   # level -> clipped V (m/s)
-
-    for lev in LEVELS_MB:
-        # Temperature
-        T_arr, lat2d, lon2d, idx = _read_field_clipped(grbs, "Temperature", lev, idx)
-
-        # Dew point
-        Td_arr, _, _, _ = _read_field_clipped(grbs, "Dew point temperature", lev, idx)
-
-        # Compute RH from clipped arrays — discard full-grid T/Td immediately
-        rh_co[lev] = _rh(T_arr, Td_arr)
-        del T_arr, Td_arr
-
-        # Wind (needed for cloud-base wind speed)
-        u_arr, _, _, _ = _read_field_clipped(grbs, "U component of wind", lev, idx)
-        v_arr, _, _, _ = _read_field_clipped(grbs, "V component of wind", lev, idx)
-        U_co[lev] = u_arr
-        V_co[lev] = v_arr
-        del u_arr, v_arr
-
-    grbs.close()
-
-    # ── Clipped lat/lon ───────────────────────────────────────────────────────
-    r0, r1, c0, c1, step = idx
-    lat_co = lat2d[r0:r1, c0:c1][::step, ::step]
-    lon_co = lon2d[r0:r1, c0:c1][::step, ::step]
-    lon_co = np.where(lon_co > 180, lon_co - 360, lon_co)
-    shape  = lat_co.shape
-
-    # ── 1. Upper saturated layer (700–500 mb) ─────────────────────────────────
-    upper_levels  = [lev for lev in LEVELS_MB if lev <= 700]
-    max_upper_rh  = np.zeros(shape)
-    window_mb     = 200
+    # ── 1. Upper saturated layer (700-500 mb) ─────────────────────────────────
+    upper_levels = [lev for lev in LEVELS_MB if lev <= 700]
+    max_upper_rh = np.zeros(shape)
+    window_mb    = 200
 
     for lev_top in upper_levels:
         lev_bot = lev_top + window_mb
-        window  = [lev for lev in upper_levels if lev_top <= lev <= lev_bot]
+        window  = [l for l in upper_levels if lev_top <= l <= lev_bot]
         if len(window) < 2:
             continue
-        mean_rh = np.mean([rh_co[lev] for lev in window], axis=0)
+        mean_rh = np.mean([rh_co[l] for l in window], axis=0)
         max_upper_rh = np.maximum(max_upper_rh, mean_rh)
 
     upper_cloud = max_upper_rh >= 80.0
 
-    # ── 2. Maximum 100 mb RH decrease in column (850→500 mb, bottom up) ──────
-    scan_levels        = sorted(LEVELS_MB, reverse=True)   # 850 → 500
+    # ── 2. Max 100 mb RH decrease in column (850→500 mb, bottom up) ──────────
+    scan_levels        = sorted(LEVELS_MB, reverse=True)   # 850→500
     max_rh_decrease    = np.zeros(shape)
     cloud_base_wind_kt = np.zeros(shape)
 
@@ -211,10 +219,8 @@ def fetch_virga(cycle_utc: str, fxx: int = 1) -> dict:
         lev_top = lev_bot - 100
         if lev_top not in rh_co:
             continue
-
         decrease_here = rh_co[lev_bot] - rh_co[lev_top]
 
-        # Wind at nearest available level to the midpoint
         lev_mid  = lev_bot - 50
         wind_lev = min(U_co.keys(), key=lambda l: abs(l - lev_mid))
         wspd_kt  = np.sqrt(U_co[wind_lev]**2 + V_co[wind_lev]**2) * 1.94384
@@ -227,7 +233,7 @@ def fetch_virga(cycle_utc: str, fxx: int = 1) -> dict:
     virga_pct = np.where(upper_cloud, np.clip(max_rh_decrease, 0, 100), 0.0)
     cat       = _virga_category(virga_pct)
 
-    # ── Build point list (skip < 20% to keep JSON payload small) ─────────────
+    # ── Build point list ──────────────────────────────────────────────────────
     points = []
     ny, nx = shape
     for i in range(ny):
