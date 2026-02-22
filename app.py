@@ -6,8 +6,13 @@ from metar import get_metars_cached, summarize_metars
 from rap_point import get_rap_point_guidance_cached
 from winds import get_hrrr_gusts_cached, get_cycle_status_cached
 from froude import get_froude_cached
+from virga import get_virga_cached
+from prefetch import start_prefetch_thread, get_all_status
 
 app = Flask(__name__)
+
+# Start background pre-fetcher (downloads F01-F12 for all products into cache)
+start_prefetch_thread()
 
 HOME_TEMPLATE = """
 <!doctype html>
@@ -75,6 +80,7 @@ HOME_TEMPLATE = """
       <p><a href="/api/rap/points">/api/rap/points</a> (RAP point guidance)</p>
       <p><a href="/map/winds">/map/winds</a> (HRRR Colorado Wind Gusts)</p>
       <p><a href="/map/froude">/map/froude</a> (HRRR Colorado Froude Number)</p>
+      <p><a href="/map/virga">/map/virga</a> (HRRR Colorado Virga Potential)</p>
       <p><a href="/debug/routes">/debug/routes</a> (registered routes)</p>
     </div>
   </body>
@@ -826,6 +832,446 @@ def api_froude_colorado():
                 "fxx": fxx, "cycle_utc": cycle_utc,
             }), 404
         raise
+
+
+VIRGA_MAP_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HRRR Virga Potential - Colorado</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: sans-serif; }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.5rem 1.2rem; background: var(--panel);
+      border-bottom: 1px solid var(--border); gap: 1rem; flex-wrap: wrap;
+      min-height: 56px;
+    }
+    header h1 { font-size: 1rem; font-weight: 700; color: var(--accent); white-space: nowrap; }
+    .subtitle { font-size: 0.8rem; color: var(--muted); margin-left: 0.5rem; }
+    #cycle-wrap { display: flex; align-items: center; gap: 0.5rem; }
+    #cycle-wrap label { font-size: 0.72rem; color: var(--muted); }
+    #cycle-select {
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer;
+    }
+    #progress-wrap {
+      display: flex; align-items: center; gap: 0.5rem;
+      background: rgba(88,166,255,0.06); border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.3rem 0.75rem; min-width: 160px;
+    }
+    #progress-label { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+    #progress-bar-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    #progress-bar-fill {
+      height: 100%; width: 0%; border-radius: 3px;
+      background: linear-gradient(90deg, var(--accent), #2ecc71);
+      transition: width 0.4s ease;
+    }
+    #progress-pct { font-size: 0.8rem; font-weight: 700; color: var(--accent); min-width: 2.5rem; }
+    #hours-wrap { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }
+    #hours-wrap label { font-size: 0.72rem; color: var(--muted); white-space: nowrap; margin-right: 0.2rem; }
+    .hr-btn {
+      font-size: 0.7rem; font-weight: 600; padding: 0.2rem 0.4rem;
+      border-radius: 4px; border: 1px solid var(--border);
+      background: var(--panel); color: var(--muted);
+      cursor: not-allowed; opacity: 0.4; transition: all 0.15s; min-width: 2rem; text-align: center;
+      position: relative;
+    }
+    .hr-btn.avail { color: var(--text); opacity: 1; cursor: pointer; border-color: #444; }
+    .hr-btn.avail:hover { background: #2a3a4a; border-color: var(--accent); }
+    .hr-btn.active { background: var(--accent); color: #0d1117; border-color: var(--accent); cursor: default; }
+    /* Cache-ready dot indicator */
+    .hr-btn.cache-ready::after {
+      content: ''; position: absolute; top: -3px; right: -3px;
+      width: 6px; height: 6px; border-radius: 50%; background: #2ecc71;
+    }
+    .hr-btn.cache-loading::after {
+      content: ''; position: absolute; top: -3px; right: -3px;
+      width: 6px; height: 6px; border-radius: 50%; background: #f1c40f;
+    }
+    #meta-strip { font-size: 0.72rem; color: var(--muted); display: flex; gap: 1.2rem; flex-wrap: wrap; }
+    #meta-strip b { color: var(--text); }
+    .back-link {
+      font-size: 0.8rem; color: var(--muted); text-decoration: none;
+      border: 1px solid var(--border); border-radius: 4px; padding: 0.3rem 0.65rem; white-space: nowrap;
+    }
+    #map { width: 100%; height: calc(100vh - 56px); }
+    #legend {
+      position: absolute; bottom: 2rem; left: 1rem; z-index: 1000;
+      background: rgba(13,17,23,0.92); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.75rem; min-width: 220px;
+    }
+    .leg-title { font-size: 0.65rem; text-transform: uppercase; color: var(--muted); margin-bottom: 0.5rem; }
+    .leg-row { display: flex; align-items: center; gap: 0.55rem; margin: 0.3rem 0; }
+    .leg-swatch { width: 22px; height: 13px; border-radius: 3px; opacity: 0.85; }
+    .leg-sub { font-size: 0.65rem; color: var(--muted); margin-left: auto; }
+    #cache-strip {
+      font-size: 0.68rem; color: var(--muted); padding: 0 0.75rem;
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+    .dot-green  { background: #2ecc71; }
+    .dot-yellow { background: #f1c40f; }
+    .dot-grey   { background: #555; }
+    #loading-overlay {
+      position: absolute; inset: 0; z-index: 2000; background: rgba(13,17,23,0.88);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem;
+      transition: opacity 0.3s;
+    }
+    #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+    .spinner {
+      width: 42px; height: 42px; border: 3px solid var(--border);
+      border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #load-status { font-size: 0.8rem; color: var(--muted); text-align: center; max-width: 320px; }
+    #error-banner {
+      display: none; position: absolute; top: 1rem; left: 50%; transform: translateX(-50%); z-index: 3000;
+      background: #3d1c1c; border: 1px solid #e74c3c; color: #ffb3b3;
+      border-radius: 6px; padding: 0.6rem 1rem; font-size: 0.82rem; max-width: 90%;
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div style="display:flex; align-items:baseline; flex-shrink:0;">
+    <h1>VIRGA POTENTIAL</h1>
+    <span class="subtitle">Colorado &middot; 700&ndash;500 mb sat layer &middot; 100 mb RH decrease</span>
+  </div>
+  <div id="cycle-wrap">
+    <label for="cycle-select">CYCLE</label>
+    <select id="cycle-select"><option>Loading...</option></select>
+  </div>
+  <div id="progress-wrap">
+    <span id="progress-label">AVAIL</span>
+    <div id="progress-bar-track"><div id="progress-bar-fill"></div></div>
+    <span id="progress-pct">--%</span>
+  </div>
+  <div id="hours-wrap"><label>FCST HOUR</label></div>
+  <div id="cache-strip">
+    <span class="dot dot-green"></span>ready&nbsp;
+    <span class="dot dot-yellow"></span>loading&nbsp;
+    <span class="dot dot-grey"></span>pending
+  </div>
+  <div id="meta-strip">
+    <span>VALID <b id="m-valid">--</b></span>
+    <span>PTS <b id="m-pts">--</b></span>
+  </div>
+  <a class="back-link" href="/">&#8592; Home</a>
+</header>
+
+<div id="map"></div>
+
+<div id="legend">
+  <div class="leg-title">Virga Potential (100 mb RH decrease where upper cloud present)</div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#f1c40f"></div>
+    20&ndash;40% &mdash; Low
+    <span class="leg-sub">light evap</span>
+  </div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#e67e22"></div>
+    40&ndash;60% &mdash; Moderate
+    <span class="leg-sub"></span>
+  </div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#e74c3c"></div>
+    60&ndash;80% &mdash; High
+    <span class="leg-sub"></span>
+  </div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#8e44ad"></div>
+    &ge;80% &mdash; Extreme
+    <span class="leg-sub">full evap likely</span>
+  </div>
+  <div style="margin-top:0.6rem; font-size:0.65rem; color:var(--muted);">
+    Contour lines = cloud base wind (kt)
+  </div>
+</div>
+
+<div id="loading-overlay">
+  <div class="spinner"></div>
+  <div id="load-status">Checking HRRR availability...<br>
+    <small>Green dot on hour button = pre-cached, loads instantly</small>
+  </div>
+</div>
+<div id="error-banner"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+function virgaColor(cat) {
+  if (cat === 4) return '#8e44ad';   // extreme - purple
+  if (cat === 3) return '#e74c3c';   // high - red
+  if (cat === 2) return '#e67e22';   // moderate - orange
+  return '#f1c40f';                  // low - yellow
+}
+
+const map = L.map('map', {
+  center: [39.0, -105.5], zoom: 7,
+  renderer: L.canvas(), preferCanvas: true,
+});
+L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+  attribution: 'Map: OpenTopoMap', maxZoom: 11,
+}).addTo(map);
+
+let virgaLayer  = null;
+let cycleStatus = null;
+let cacheStatus = null;
+let activeCycle = null;
+let activeFxx   = 1;
+
+// ── Status fetchers ───────────────────────────────────────────────────────────
+async function fetchStatus() {
+  const r = await fetch('/api/winds/status');
+  if (!r.ok) throw new Error('Status ' + r.status);
+  return r.json();
+}
+
+async function fetchCacheStatus() {
+  const r = await fetch('/api/cache/status');
+  if (!r.ok) return null;
+  return r.json();
+}
+
+function applyStatus(status) {
+  cycleStatus = status;
+  const sel = document.getElementById('cycle-select');
+  sel.innerHTML = '';
+  status.cycles.forEach(function(c, i) {
+    const opt = document.createElement('option');
+    opt.value = c.cycle_utc;
+    opt.textContent = c.cycle_utc + '  (' + c.pct_complete + '%)';
+    if (i === 0) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  updateUI(status.cycles[0]);
+  if (!activeCycle) activeCycle = status.cycles[0].cycle_utc;
+}
+
+function updateUI(cycleData) {
+  document.getElementById('progress-bar-fill').style.width = cycleData.pct_complete + '%';
+  document.getElementById('progress-pct').textContent      = cycleData.pct_complete + '%';
+  const wrap = document.getElementById('hours-wrap');
+  wrap.querySelectorAll('.hr-btn').forEach(function(b) { b.remove(); });
+
+  const virga_cache = cacheStatus && cacheStatus.products
+    ? cacheStatus.products.virga || {}
+    : {};
+
+  for (var fxx = 1; fxx <= 12; fxx++) {
+    const btn = document.createElement('button');
+    btn.className   = 'hr-btn';
+    btn.textContent = 'F' + String(fxx).padStart(2,'0');
+    btn.dataset.fxx = fxx;
+
+    if (cycleData.available_hours.includes(fxx)) {
+      btn.classList.add('avail');
+      btn.addEventListener('click', onHourClick);
+    }
+
+    // Cache dot indicator
+    const cs = virga_cache[fxx];
+    if (cs === 'ready')   btn.classList.add('cache-ready');
+    if (cs === 'loading') btn.classList.add('cache-loading');
+
+    if (fxx === activeFxx) btn.classList.add('active');
+    wrap.appendChild(btn);
+  }
+}
+
+function setActiveBtn(fxx) {
+  document.querySelectorAll('.hr-btn').forEach(function(b) {
+    b.classList.toggle('active', parseInt(b.dataset.fxx) === fxx);
+  });
+}
+
+function onHourClick(e) {
+  const fxx = parseInt(e.target.dataset.fxx);
+  if (fxx === activeFxx) return;
+  activeFxx = fxx;
+  setActiveBtn(fxx);
+  loadVirga(activeCycle, fxx);
+}
+
+document.getElementById('cycle-select').addEventListener('change', function() {
+  activeCycle = this.value;
+  const cd = cycleStatus.cycles.find(function(c) { return c.cycle_utc === activeCycle; });
+  if (cd) updateUI(cd);
+  if (cd && cd.available_hours.length > 0) {
+    activeFxx = cd.available_hours[0];
+    setActiveBtn(activeFxx);
+    loadVirga(activeCycle, activeFxx);
+  }
+});
+
+// ── Data loader ───────────────────────────────────────────────────────────────
+async function loadVirga(cycle_utc, fxx) {
+  const overlay  = document.getElementById('loading-overlay');
+  const statusEl = document.getElementById('load-status');
+  const errorEl  = document.getElementById('error-banner');
+
+  // Check if this hour is pre-cached (instant) or needs downloading
+  const cs = cacheStatus && cacheStatus.products && cacheStatus.products.virga
+    ? cacheStatus.products.virga[fxx] : null;
+  const isReady = (cs === 'ready');
+
+  overlay.classList.remove('hidden');
+  statusEl.innerHTML = isReady
+    ? 'Loading from cache &mdash; F' + String(fxx).padStart(2,'0') + ' (instant)'
+    : 'Downloading &amp; computing virga &mdash; F' + String(fxx).padStart(2,'0') +
+      '<br><small>First load downloads ~200 MB prs file, ~90 s</small>';
+  errorEl.style.display = 'none';
+
+  try {
+    const url  = '/api/virga/colorado?fxx=' + fxx + '&cycle_utc=' + encodeURIComponent(cycle_utc);
+    const resp = await fetch(url);
+
+    if (!resp.ok) {
+      const body = await resp.json().catch(function() { return null; });
+      if (resp.status === 404 && body && body.error === 'not_available') {
+        overlay.classList.add('hidden');
+        errorEl.style.display = 'block';
+        errorEl.textContent = '\u26a0\ufe0f F' + String(fxx).padStart(2,'0') +
+          ' not yet on AWS \u2014 try a lower hour.';
+        return;
+      }
+      throw new Error('Server ' + resp.status);
+    }
+
+    const data = await resp.json();
+    document.getElementById('m-valid').textContent = data.valid_utc;
+    document.getElementById('m-pts').textContent   = data.point_count.toLocaleString();
+
+    if (virgaLayer) { map.removeLayer(virgaLayer); virgaLayer = null; }
+
+    if (data.point_count === 0) {
+      overlay.classList.add('hidden');
+      errorEl.style.display = 'block';
+      errorEl.textContent = 'No virga potential areas this hour (all RH decrease < 20%).';
+      return;
+    }
+
+    const half     = data.cell_size_deg / 2;
+    const halfLon  = data.cell_size_deg * 1.25;
+    const renderer = L.canvas();
+    const rects    = [];
+
+    data.points.forEach(function(p) {
+      const color = virgaColor(p.cat);
+      const rect  = L.rectangle(
+        [[p.lat - half, p.lon - halfLon], [p.lat + half, p.lon + halfLon]],
+        { renderer: renderer, color: color, fillColor: color, fillOpacity: 0.65, weight: 0 }
+      );
+      rect.bindPopup(
+        '<b>Virga: ' + p.virga_pct.toFixed(0) + '%</b><br>' +
+        'CB Wind: ' + p.cb_wind_kt.toFixed(0) + ' kt<br>' +
+        'Upper RH: ' + p.upper_rh.toFixed(0) + '%<br>' +
+        p.lat.toFixed(3) + '\u00b0N, ' + Math.abs(p.lon).toFixed(3) + '\u00b0W',
+        { maxWidth: 170 }
+      );
+      rects.push(rect);
+    });
+
+    virgaLayer = L.layerGroup(rects).addTo(map);
+    overlay.classList.add('hidden');
+
+  } catch (err) {
+    overlay.classList.add('hidden');
+    errorEl.style.display = 'block';
+    errorEl.textContent   = 'Error: ' + err.message;
+    console.error(err);
+  }
+}
+
+// ── Init + auto-refresh ───────────────────────────────────────────────────────
+async function init() {
+  try {
+    // Fetch both status calls in parallel
+    const [status, cache] = await Promise.all([fetchStatus(), fetchCacheStatus()]);
+    cacheStatus = cache;
+    applyStatus(status);
+
+    const latest = status.cycles[0];
+    activeCycle  = latest.cycle_utc;
+    if (latest.available_hours.length > 0) {
+      activeFxx = latest.available_hours[0];
+      setActiveBtn(activeFxx);
+      loadVirga(activeCycle, activeFxx);
+    }
+  } catch (err) {
+    document.getElementById('load-status').textContent = 'Init failed: ' + err.message;
+  }
+}
+
+// Refresh availability every 5 min; refresh cache status every 30 s
+setInterval(async function() {
+  try { applyStatus(await fetchStatus()); } catch(e) {}
+}, 5 * 60 * 1000);
+
+setInterval(async function() {
+  try {
+    cacheStatus = await fetchCacheStatus();
+    // Re-draw buttons for active cycle to update cache dots
+    if (cycleStatus) {
+      const cd = cycleStatus.cycles.find(function(c) { return c.cycle_utc === activeCycle; });
+      if (cd) updateUI(cd);
+    }
+  } catch(e) {}
+}, 30 * 1000);
+
+init();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/map/virga")
+def map_virga():
+    return render_template_string(VIRGA_MAP_TEMPLATE)
+
+
+@app.get("/api/virga/colorado")
+def api_virga_colorado():
+    fxx       = int(request.args.get("fxx", 1))
+    cycle_utc = request.args.get("cycle_utc")
+    ttl       = int(request.args.get("ttl", os.environ.get("VIRGA_TTL", "600")))
+
+    if not cycle_utc:
+        status    = get_cycle_status_cached(ttl_seconds=300)
+        cycle_utc = status["cycles"][0]["cycle_utc"]
+
+    try:
+        data = get_virga_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=ttl)
+        return jsonify(data)
+    except Exception as e:
+        msg = str(e)
+        not_ready = any(k in msg.lower() for k in [
+            "did not find", "not found", "no such file", "404", "unavailable"
+        ])
+        if not_ready:
+            return jsonify({
+                "error": "not_available",
+                "message": f"F{fxx:02d} for cycle {cycle_utc} is not yet on AWS.",
+                "fxx": fxx, "cycle_utc": cycle_utc,
+            }), 404
+        raise
+
+
+@app.get("/api/cache/status")
+def api_cache_status():
+    """Return pre-fetch cache status for all products and forecast hours."""
+    return jsonify(get_all_status())
+
 
 
 @app.get("/")
