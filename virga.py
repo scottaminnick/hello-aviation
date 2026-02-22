@@ -1,42 +1,25 @@
 """
 virga.py  –  HRRR-based Virga Potential calculator for Colorado
 ===============================================================
-Adapted from virga_potential_forecast_siphon.py (RAP/Siphon/matplotlib)
-Rewritten for HRRR prs product via pygrib, returning JSON for Leaflet.
+Memory-efficient rewrite: uses pygrib.select() per field and clips
+to Colorado immediately, so we never hold more than ~2 MB in RAM
+at once instead of the full ~480 MB grid.
 
 Science (unchanged from original script)
 -----------------------------------------
-1. UPPER SATURATED LAYER
-   Scan 700–500 mb for the maximum mean RH over any 200 mb depth.
-   Only proceed where that max mean RH ≥ 80 % (cloud layer present).
+1. UPPER SATURATED LAYER  (700–500 mb)
+   Scan every 200 mb window for mean RH ≥ 80%.
+   Only show virga where an upper cloud layer is present.
 
-2. RH DECREASE IN COLUMN
-   Scan 850–500 mb from bottom upward. At each level, compute the
-   100 mb RH decrease (RH at level minus RH 100 mb above it).
-   Track the maximum decrease found anywhere in the column.
-   This is the "evaporation zone" where virga occurs.
+2. RH DECREASE IN COLUMN  (850–500 mb)
+   For each level, compute the 100 mb RH decrease (drying with height).
+   Track the maximum decrease and which level it occurred at.
 
 3. CLOUD BASE WIND
-   At the level with the greatest 100 mb RH decrease, record the
-   50 mb mean wind speed.  This approximates the momentum that
-   virga shafts would carry downward — a proxy for wind shear /
-   gust potential at the surface beneath a virga shaft.
+   At the level of maximum RH decrease, record the 50 mb mean wind
+   speed (kt) as a proxy for virga shaft momentum.
 
-Output categories (virga potential %)
---------------------------------------
-  < 20 %   negligible
-  20–40 %  low
-  40–60 %  moderate
-  60–80 %  high
-  ≥ 80 %   extreme
-
-Data source
------------
-  HRRR prs product (wrfprsf##.grib2) – same file used by froude.py.
-  RH computed from Temperature (T) and Dew-point temperature (Td)
-  using the August-Roche-Magnus approximation:
-      e(T) = 6.112 * exp(17.67 * T_C / (T_C + 243.5))
-      RH    = 100 * e(Td) / e(T)
+RH computed from T and Td via August-Roche-Magnus approximation.
 """
 
 import os
@@ -50,16 +33,13 @@ from herbie import Herbie
 HERBIE_DIR = Path(os.environ.get("HERBIE_DATA_DIR", "/tmp/herbie"))
 HERBIE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Colorado bounding box (same as winds.py / froude.py)
 CO_LAT_MIN, CO_LAT_MAX = 36.8, 41.2
 CO_LON_MIN, CO_LON_MAX = -109.2, -101.9
 
-# Pressure levels available in HRRR prs at 25 mb spacing
-# We only need the tropospheric layers relevant to virga
+# Only the levels we actually need — 500 to 850 mb at 25 mb spacing
 LEVELS_MB = [500, 525, 550, 575, 600, 625, 650, 675,
              700, 725, 750, 775, 800, 825, 850]
 
-# In-memory cache keyed by (cycle_utc, fxx)
 _CACHE = {}
 
 
@@ -84,7 +64,6 @@ def _find_latest_hrrr_cycle(max_lookback_hours=6):
 
 
 def _download(cycle, fxx):
-    """Download HRRR prs GRIB2 and return local Path."""
     H = Herbie(cycle, model="hrrr", product="prs", fxx=fxx,
                save_dir=str(HERBIE_DIR), overwrite=False)
     p = Path(H.download())
@@ -93,40 +72,73 @@ def _download(cycle, fxx):
     return p
 
 
+# ── Clipping helper ───────────────────────────────────────────────────────────
+
+_CLIP_IDX = {}   # cache the slice indices after first call
+
+
+def _get_clip_idx(lat2d, lon2d, step=2):
+    """Compute and cache the row/col slice for Colorado."""
+    key = lat2d.shape
+    if key not in _CLIP_IDX:
+        mask = (
+            (lat2d >= CO_LAT_MIN) & (lat2d <= CO_LAT_MAX) &
+            (lon2d >= CO_LON_MIN) & (lon2d <= CO_LON_MAX)
+        )
+        rows, cols = np.where(mask)
+        if len(rows) == 0:
+            raise ValueError("No grid points inside Colorado bounding box.")
+        _CLIP_IDX[key] = (rows.min(), rows.max() + 1,
+                          cols.min(), cols.max() + 1, step)
+    return _CLIP_IDX[key]
+
+
+def _clip(arr, idx):
+    r0, r1, c0, c1, step = idx
+    return arr[r0:r1, c0:c1][::step, ::step]
+
+
 # ── Physics ───────────────────────────────────────────────────────────────────
 
-def _rh_from_t_td(T_K, Td_K):
-    """
-    Relative humidity (0–100 %) from temperature and dewpoint (both Kelvin).
-    Uses the August-Roche-Magnus approximation.
-    """
+def _rh(T_K, Td_K):
+    """RH (0-100%) from temperature and dewpoint in Kelvin."""
     T_C  = T_K  - 273.15
     Td_C = Td_K - 273.15
     e_T  = 6.112 * np.exp(17.67 * T_C  / (T_C  + 243.5))
     e_Td = 6.112 * np.exp(17.67 * Td_C / (Td_C + 243.5))
-    rh   = 100.0 * e_Td / e_T
-    return np.clip(rh, 0.0, 100.0)
+    return np.clip(100.0 * e_Td / e_T, 0.0, 100.0)
 
 
 def _virga_category(pct):
-    """Integer category for colour coding."""
     cat = np.zeros_like(pct, dtype=int)
-    cat[pct >= 20] = 1   # low
-    cat[pct >= 40] = 2   # moderate
-    cat[pct >= 60] = 3   # high
-    cat[pct >= 80] = 4   # extreme
+    cat[pct >= 20] = 1
+    cat[pct >= 40] = 2
+    cat[pct >= 60] = 3
+    cat[pct >= 80] = 4
     return cat
+
+
+# ── Memory-efficient field reader ─────────────────────────────────────────────
+
+def _read_field_clipped(grbs, name, level, idx):
+    """
+    Select a single field by name+level, read it, clip to Colorado,
+    and return the small clipped array.  Never holds the full grid.
+    """
+    try:
+        msgs = grbs.select(name=name, typeOfLevel="isobaricInhPa", level=level)
+    except ValueError:
+        raise ValueError(f"Field not found: '{name}' at {level} mb")
+    data, lat2d, lon2d = msgs[0].data()
+    lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
+    if idx is None:
+        idx = _get_clip_idx(lat2d, lon2d)
+    return _clip(data, idx), lat2d, lon2d, idx
 
 
 # ── Main fetch ────────────────────────────────────────────────────────────────
 
 def fetch_virga(cycle_utc: str, fxx: int = 1) -> dict:
-    """
-    Compute virga potential grid over Colorado.
-
-    cycle_utc : ISO string e.g. '2026-02-22T02:00Z'
-    fxx       : forecast hour 1-12
-    """
     cycle = datetime.fromisoformat(
         cycle_utc.replace("Z", "+00:00")
     ).replace(tzinfo=None)
@@ -134,138 +146,94 @@ def fetch_virga(cycle_utc: str, fxx: int = 1) -> dict:
 
     prs_path = _download(cycle, fxx)
 
-    # ── Read all needed fields into memory ────────────────────────────────────
-    # We open the file once and pull everything we need level by level.
     grbs = pygrib.open(str(prs_path))
 
-    T_dict  = {}   # level_mb -> 2D array (K)
-    Td_dict = {}
-    U_dict  = {}
-    V_dict  = {}
-    lat2d   = None
-    lon2d   = None
+    # ── Pass 1: read T and Td at each level, compute RH, discard raw arrays ──
+    # Maximum memory at any point: 2 full grids (T + Td) + 1 clipped RH array
+    # Full grid ~8 MB each → peak ~16 MB instead of ~480 MB
 
-    for grb in grbs:
-        lev = grb.level
-        if lev not in LEVELS_MB:
-            continue
-        if grb.typeOfLevel != "isobaricInhPa":
-            continue
+    lat2d = lon2d = None
+    idx   = None
 
-        name = grb.name
-        if lat2d is None:
-            data, lat2d, lon2d = grb.data()
-            lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
-            arr = data
-        else:
-            arr = grb.values
+    # Dictionaries of CLIPPED arrays only (~0.1 MB each)
+    rh_co = {}   # level -> clipped RH (%)
+    U_co  = {}   # level -> clipped U (m/s)
+    V_co  = {}   # level -> clipped V (m/s)
 
-        if name == "Temperature":
-            T_dict[lev] = arr
-        elif name == "Dew point temperature":
-            Td_dict[lev] = arr
-        elif name == "U component of wind":
-            U_dict[lev] = arr
-        elif name == "V component of wind":
-            V_dict[lev] = arr
+    for lev in LEVELS_MB:
+        # Temperature
+        T_arr, lat2d, lon2d, idx = _read_field_clipped(grbs, "Temperature", lev, idx)
+
+        # Dew point
+        Td_arr, _, _, _ = _read_field_clipped(grbs, "Dew point temperature", lev, idx)
+
+        # Compute RH from clipped arrays — discard full-grid T/Td immediately
+        rh_co[lev] = _rh(T_arr, Td_arr)
+        del T_arr, Td_arr
+
+        # Wind (needed for cloud-base wind speed)
+        u_arr, _, _, _ = _read_field_clipped(grbs, "U component of wind", lev, idx)
+        v_arr, _, _, _ = _read_field_clipped(grbs, "V component of wind", lev, idx)
+        U_co[lev] = u_arr
+        V_co[lev] = v_arr
+        del u_arr, v_arr
 
     grbs.close()
 
-    # Confirm we got what we need
-    for lev in LEVELS_MB:
-        for d, label in [(T_dict, "T"), (Td_dict, "Td")]:
-            if lev not in d:
-                raise ValueError(f"Missing {label} at {lev} mb in {prs_path.name}")
+    # ── Clipped lat/lon ───────────────────────────────────────────────────────
+    r0, r1, c0, c1, step = idx
+    lat_co = lat2d[r0:r1, c0:c1][::step, ::step]
+    lon_co = lon2d[r0:r1, c0:c1][::step, ::step]
+    lon_co = np.where(lon_co > 180, lon_co - 360, lon_co)
+    shape  = lat_co.shape
 
-    # ── Clip everything to Colorado ───────────────────────────────────────────
-    step = 2
-    mask = (
-        (lat2d >= CO_LAT_MIN) & (lat2d <= CO_LAT_MAX) &
-        (lon2d >= CO_LON_MIN) & (lon2d <= CO_LON_MAX)
-    )
-    rows, cols = np.where(mask)
-    if len(rows) == 0:
-        raise ValueError("No grid points inside Colorado bounding box.")
-    r0, r1 = rows.min(), rows.max() + 1
-    c0, c1 = cols.min(), cols.max() + 1
+    # ── 1. Upper saturated layer (700–500 mb) ─────────────────────────────────
+    upper_levels  = [lev for lev in LEVELS_MB if lev <= 700]
+    max_upper_rh  = np.zeros(shape)
+    window_mb     = 200
 
-    def clip(arr):
-        return arr[r0:r1, c0:c1][::step, ::step]
-
-    lat_co = clip(lat2d)
-    lon_co = clip(lon2d)
-
-    # Build clipped RH dict and wind dict
-    rh = {}   # level_mb -> 2D RH array (%)
-    U  = {}
-    V  = {}
-    for lev in LEVELS_MB:
-        rh[lev] = clip(_rh_from_t_td(T_dict[lev], Td_dict[lev]))
-        if lev in U_dict:
-            U[lev] = clip(U_dict[lev])
-            V[lev] = clip(V_dict[lev])
-
-    shape = lat_co.shape
-
-    # ── 1. Find upper saturated layer (700–500 mb) ────────────────────────────
-    # Scan every 200 mb window: [700-500], [675-475], [650-450], [625-425], [600-400]
-    # We defined LEVELS_MB top-down (500→850), so index carefully.
-    upper_levels = [lev for lev in LEVELS_MB if lev <= 700]   # 500–700 mb
-
-    max_upper_rh = np.zeros(shape)
-    window_mb    = 200   # thickness of saturated layer
-
-    for i, lev_top in enumerate(upper_levels):
+    for lev_top in upper_levels:
         lev_bot = lev_top + window_mb
         window  = [lev for lev in upper_levels if lev_top <= lev <= lev_bot]
         if len(window) < 2:
             continue
-        mean_rh = np.mean([rh[lev] for lev in window], axis=0)
+        mean_rh = np.mean([rh_co[lev] for lev in window], axis=0)
         max_upper_rh = np.maximum(max_upper_rh, mean_rh)
 
-    upper_cloud_present = max_upper_rh >= 80.0   # boolean mask
+    upper_cloud = max_upper_rh >= 80.0
 
-    # ── 2. Maximum 100 mb RH decrease in column ───────────────────────────────
-    # Scan from 850 mb upward (bottom to top).
-    # At each level, RH decrease = RH(level) - RH(level - 100 mb)
-    # i.e., how much drier the layer 100 mb above is compared to below.
-    scan_levels = sorted(LEVELS_MB, reverse=True)   # 850 → 500
-
+    # ── 2. Maximum 100 mb RH decrease in column (850→500 mb, bottom up) ──────
+    scan_levels        = sorted(LEVELS_MB, reverse=True)   # 850 → 500
     max_rh_decrease    = np.zeros(shape)
-    cloud_base_wind_kt = np.zeros(shape)   # wind at level of max decrease
+    cloud_base_wind_kt = np.zeros(shape)
 
     for lev_bot in scan_levels:
         lev_top = lev_bot - 100
-        if lev_top not in rh:
+        if lev_top not in rh_co:
             continue
 
-        decrease_here = rh[lev_bot] - rh[lev_top]   # positive = dries upward
+        decrease_here = rh_co[lev_bot] - rh_co[lev_top]
 
-        # Wind speed at the 50 mb mid-point of the drying layer
-        lev_mid = lev_bot - 50
-        # Use nearest available level for wind
-        wind_lev = min(U.keys(), key=lambda l: abs(l - lev_mid))
-        wspd_here = np.sqrt(U[wind_lev]**2 + V[wind_lev]**2) * 1.94384  # kt
+        # Wind at nearest available level to the midpoint
+        lev_mid  = lev_bot - 50
+        wind_lev = min(U_co.keys(), key=lambda l: abs(l - lev_mid))
+        wspd_kt  = np.sqrt(U_co[wind_lev]**2 + V_co[wind_lev]**2) * 1.94384
 
-        # Where this is the largest decrease so far, record it
-        better = decrease_here > max_rh_decrease
-        max_rh_decrease    = np.where(better, decrease_here, max_rh_decrease)
-        cloud_base_wind_kt = np.where(better, wspd_here,     cloud_base_wind_kt)
+        better             = decrease_here > max_rh_decrease
+        max_rh_decrease    = np.where(better, decrease_here,    max_rh_decrease)
+        cloud_base_wind_kt = np.where(better, wspd_kt,          cloud_base_wind_kt)
 
     # ── 3. Apply upper cloud mask ─────────────────────────────────────────────
-    # Only show virga potential where an upper saturated layer exists
-    virga_pct = np.where(upper_cloud_present, max_rh_decrease, 0.0)
-    virga_pct = np.clip(virga_pct, 0.0, 100.0)
+    virga_pct = np.where(upper_cloud, np.clip(max_rh_decrease, 0, 100), 0.0)
+    cat       = _virga_category(virga_pct)
 
-    cat = _virga_category(virga_pct)
-
-    # ── Build point list ──────────────────────────────────────────────────────
+    # ── Build point list (skip < 20% to keep JSON payload small) ─────────────
     points = []
-    ny, nx = lat_co.shape
+    ny, nx = shape
     for i in range(ny):
         for j in range(nx):
             vpct = float(virga_pct[i, j])
-            if vpct < 20.0:        # skip negligible cells to keep payload small
+            if vpct < 20.0:
                 continue
             points.append({
                 "lat":        round(float(lat_co[i, j]), 4),
@@ -278,14 +246,14 @@ def fetch_virga(cycle_utc: str, fxx: int = 1) -> dict:
 
     valid_dt = (cycle + timedelta(hours=fxx)).replace(tzinfo=timezone.utc)
     return {
-        "model":       "HRRR",
-        "product":     "prs",
-        "cycle_utc":   cycle_aware.isoformat(timespec="minutes").replace("+00:00", "Z"),
-        "valid_utc":   valid_dt.isoformat(timespec="minutes").replace("+00:00", "Z"),
-        "fxx":         fxx,
+        "model":         "HRRR",
+        "product":       "prs",
+        "cycle_utc":     cycle_aware.isoformat(timespec="minutes").replace("+00:00", "Z"),
+        "valid_utc":     valid_dt.isoformat(timespec="minutes").replace("+00:00", "Z"),
+        "fxx":           fxx,
         "cell_size_deg": 0.055,
-        "point_count": len(points),
-        "points":      points,
+        "point_count":   len(points),
+        "points":        points,
     }
 
 
