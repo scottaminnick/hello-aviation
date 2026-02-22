@@ -96,18 +96,42 @@ WINDS_MAP_TEMPLATE = """
     html, body { height: 100%; background: var(--bg); color: var(--text); font-family: sans-serif; }
     header {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 0.6rem 1.2rem; background: var(--panel);
-      border-bottom: 1px solid var(--border); gap: 1rem;
+      padding: 0.5rem 1.2rem; background: var(--panel);
+      border-bottom: 1px solid var(--border); gap: 1rem; flex-wrap: wrap;
     }
-    header h1 { font-size: 1rem; font-weight: 700; color: var(--accent); }
+    header h1 { font-size: 1rem; font-weight: 700; color: var(--accent); white-space: nowrap; }
     .subtitle { font-size: 0.8rem; color: var(--muted); margin-left: 0.5rem; }
-    #meta-strip { font-size: 0.72rem; color: var(--muted); display: flex; gap: 1.2rem; }
+    #meta-strip { font-size: 0.72rem; color: var(--muted); display: flex; gap: 1.2rem; flex-wrap: wrap; }
     #meta-strip b { color: var(--text); }
+
+    /* ── Forecast hour slider ── */
+    #slider-wrap {
+      display: flex; align-items: center; gap: 0.6rem;
+      background: rgba(88,166,255,0.08); border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.3rem 0.75rem;
+    }
+    #slider-wrap label { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+    #fxx-slider {
+      -webkit-appearance: none; appearance: none;
+      width: 160px; height: 4px; border-radius: 2px;
+      background: var(--border); outline: none; cursor: pointer;
+    }
+    #fxx-slider::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: var(--accent); cursor: pointer;
+    }
+    #fxx-label {
+      font-size: 0.8rem; font-weight: 700; color: var(--accent);
+      min-width: 2.8rem; text-align: right;
+    }
+
     .back-link {
       font-size: 0.8rem; color: var(--muted); text-decoration: none;
       border: 1px solid var(--border); border-radius: 4px; padding: 0.3rem 0.65rem;
+      white-space: nowrap;
     }
-    #map { width: 100%; height: calc(100vh - 52px); }
+    #map { width: 100%; height: calc(100vh - 56px); }
     #legend {
       position: absolute; bottom: 2rem; left: 1rem; z-index: 1000;
       background: rgba(13,17,23,0.92); border: 1px solid var(--border);
@@ -122,7 +146,7 @@ WINDS_MAP_TEMPLATE = """
       background: rgba(13,17,23,0.88);
       display: flex; flex-direction: column;
       align-items: center; justify-content: center; gap: 1rem;
-      transition: opacity 0.4s;
+      transition: opacity 0.3s;
     }
     #loading-overlay.hidden { opacity: 0; pointer-events: none; }
     .spinner {
@@ -143,10 +167,18 @@ WINDS_MAP_TEMPLATE = """
 </head>
 <body>
 <header>
-  <div style="display:flex; align-items:baseline;">
+  <div style="display:flex; align-items:baseline; flex-shrink:0;">
     <h1>HRRR WIND GUSTS</h1>
-    <span class="subtitle">Colorado - 10 m AGL - Aviation scale</span>
+    <span class="subtitle">Colorado · 10 m AGL · Aviation scale</span>
   </div>
+
+  <!-- Forecast hour slider -->
+  <div id="slider-wrap">
+    <label for="fxx-slider">FCST HOUR</label>
+    <input type="range" id="fxx-slider" min="1" max="12" step="1" value="1" />
+    <span id="fxx-label">F01</span>
+  </div>
+
   <div id="meta-strip">
     <span>CYCLE <b id="m-cycle">--</b></span>
     <span>VALID <b id="m-valid">--</b></span>
@@ -167,7 +199,7 @@ WINDS_MAP_TEMPLATE = """
 
 <div id="loading-overlay">
   <div class="spinner"></div>
-  <div id="load-status">Fetching HRRR data... first load may take 30s</div>
+  <div id="load-status">Fetching HRRR F01 data... first load may take 30–60 s</div>
 </div>
 
 <div id="error-banner"></div>
@@ -193,16 +225,28 @@ L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
   maxZoom: 11,
 }).addTo(map);
 
-async function loadGusts() {
+// Track the current gust layer group so we can clear it on slider change
+let gustLayer = null;
+
+async function loadGusts(fxx) {
   const overlay  = document.getElementById('loading-overlay');
   const statusEl = document.getElementById('load-status');
   const errorEl  = document.getElementById('error-banner');
 
+  // Show overlay for every load (not just the first)
+  overlay.classList.remove('hidden');
+  statusEl.textContent = 'Fetching HRRR F0' + fxx + ' data...';
+  errorEl.style.display = 'none';
+
+  // Disable slider while loading to prevent queuing multiple requests
+  const slider = document.getElementById('fxx-slider');
+  slider.disabled = true;
+
   try {
-    const resp = await fetch('/api/winds/colorado');
+    const resp = await fetch('/api/winds/colorado?fxx=' + fxx);
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error('Server error ' + resp.status + ': ' + text.slice(0, 300));
+      throw new Error('Server ' + resp.status + ': ' + text.slice(0, 300));
     }
     const data = await resp.json();
 
@@ -210,45 +254,69 @@ async function loadGusts() {
     document.getElementById('m-valid').textContent = data.valid_utc;
     document.getElementById('m-pts').textContent   = data.point_count.toLocaleString();
 
-    const halfLat = data.cell_size_deg / 2;
-    const halfLon = data.cell_size_deg * 1.25;
-    const renderer = L.canvas();
-
     statusEl.textContent = 'Rendering ' + data.point_count.toLocaleString() + ' cells...';
 
-    requestAnimationFrame(function() {
-      data.points.forEach(function(p) {
-        var bounds = [
-          [p.lat - halfLat, p.lon - halfLon],
-          [p.lat + halfLat, p.lon + halfLon],
-        ];
-        var color = gustColor(p.gust_kt);
-        var rect = L.rectangle(bounds, {
-          renderer: renderer,
-          color: color,
-          fillColor: color,
-          fillOpacity: 0.60,
-          weight: 0,
-        });
-        rect.bindPopup(
-          '<b>' + p.gust_kt.toFixed(0) + ' kt</b><br>' +
-          p.lat.toFixed(3) + 'N, ' + Math.abs(p.lon).toFixed(3) + 'W',
-          { maxWidth: 150 }
-        );
-        rect.addTo(map);
+    // Clear previous layer
+    if (gustLayer) {
+      map.removeLayer(gustLayer);
+      gustLayer = null;
+    }
+
+    const halfLat  = data.cell_size_deg / 2;
+    const halfLon  = data.cell_size_deg * 1.25;
+    const renderer = L.canvas();
+    const rects    = [];
+
+    data.points.forEach(function(p) {
+      var bounds = [
+        [p.lat - halfLat, p.lon - halfLon],
+        [p.lat + halfLat, p.lon + halfLon],
+      ];
+      var color = gustColor(p.gust_kt);
+      var rect  = L.rectangle(bounds, {
+        renderer:    renderer,
+        color:       color,
+        fillColor:   color,
+        fillOpacity: 0.60,
+        weight:      0,
       });
-      overlay.classList.add('hidden');
+      rect.bindPopup(
+        '<b>' + p.gust_kt.toFixed(0) + ' kt</b><br>' +
+        p.lat.toFixed(3) + '\u00b0N, ' + Math.abs(p.lon).toFixed(3) + '\u00b0W',
+        { maxWidth: 150 }
+      );
+      rects.push(rect);
     });
+
+    gustLayer = L.layerGroup(rects).addTo(map);
+    overlay.classList.add('hidden');
 
   } catch (err) {
     overlay.classList.add('hidden');
     errorEl.style.display = 'block';
     errorEl.textContent = 'Error: ' + err.message;
     console.error(err);
+  } finally {
+    slider.disabled = false;
   }
 }
 
-loadGusts();
+// Slider wiring
+const slider   = document.getElementById('fxx-slider');
+const fxxLabel = document.getElementById('fxx-label');
+
+slider.addEventListener('input', function() {
+  var val = parseInt(this.value);
+  fxxLabel.textContent = 'F' + String(val).padStart(2, '0');
+});
+
+// Load on slider release (mouseup / touchend) to avoid firing mid-drag
+slider.addEventListener('change', function() {
+  loadGusts(parseInt(this.value));
+});
+
+// Initial load at F01 (F00 analysis hour has unreliable gust values in HRRR)
+loadGusts(1);
 </script>
 </body>
 </html>
