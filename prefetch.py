@@ -120,8 +120,23 @@ def _prefetch_loop():
         time.sleep(600)
 
 
-def start_prefetch_thread():
-    """Call once at app startup to launch the background thread."""
-    t = threading.Thread(target=_prefetch_loop, name="prefetch", daemon=True)
+def _delayed_start(delay_seconds):
+    """Wait a bit so the app is fully up before hammering AWS."""
+    time.sleep(delay_seconds)
+    _prefetch_loop()
+
+
+def start_prefetch_thread(delay_seconds=180):
+    """
+    Call once at app startup.
+    Waits delay_seconds before beginning downloads so the first
+    user request can complete without competing for bandwidth/memory.
+    """
+    t = threading.Thread(
+        target=_delayed_start,
+        args=(delay_seconds,),
+        name="prefetch",
+        daemon=True,
+    )
     t.start()
-    log.info("[prefetch] Background pre-fetch thread started")
+    log.info(f"[prefetch] Background pre-fetch thread will start in {delay_seconds}s")
