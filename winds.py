@@ -1,9 +1,13 @@
 """
 winds.py - HRRR Wind Gust fetcher for Colorado
 
-Strategy: use H.download(searchString=...) to byte-range download ONLY
-the GUST field into a stable file path, then open with cfgrib and
-immediately .load() into RAM before anything can delete the file.
+Key lessons learned:
+  - subset_* files (from searchString downloads) are deleted by Herbie before
+    cfgrib finishes reading them. Never use H.xarray() or H.download(searchString).
+  - H.download() with NO searchString saves a persistent full GRIB2 file.
+  - cfgrib filter_by_keys must be tight enough to match exactly one field,
+    or cfgrib iterates every message (slow + warning spam).
+  - .load() must be called immediately after open to pull data into RAM.
 """
 
 import os
@@ -43,6 +47,52 @@ def _find_latest_hrrr_cycle(max_lookback_hours=6):
     return base - timedelta(hours=2)
 
 
+def _open_gust_from_grib(grib_path: Path) -> np.ndarray:
+    """
+    Try progressively looser cfgrib filters until we find the gust field.
+    Returns a loaded DataArray (already in RAM).
+    Never falls back to no filter at all - that opens every message.
+    """
+    filters_to_try = [
+        {"shortName": "gust", "typeOfLevel": "heightAboveGround", "level": 10},
+        {"shortName": "gust", "typeOfLevel": "heightAboveGround"},
+        {"shortName": "gust", "stepType": "instant"},
+        {"shortName": "gust"},
+    ]
+
+    for filt in filters_to_try:
+        try:
+            datasets = cfgrib.open_datasets(
+                str(grib_path),
+                backend_kwargs={"indexpath": ""},
+                filter_by_keys=filt,
+            )
+        except Exception:
+            continue
+
+        ds = next((d for d in datasets if len(d.data_vars) > 0), None)
+        if ds is None:
+            continue
+
+        vname   = list(ds.data_vars)[0]
+        gust_da = ds[vname].load()   # into RAM NOW
+
+        raw_max = float(np.nanmax(gust_da.values))
+        raw_min = float(np.nanmin(gust_da.values))
+
+        # Valid surface gusts: 0-100 m/s
+        if 0 <= raw_min and raw_max <= 150:
+            return gust_da   # good field found
+
+        # Wrong field (huge values) - try next filter
+        continue
+
+    raise ValueError(
+        f"Could not find a physically plausible gust field in {grib_path.name}. "
+        "All filters either matched nothing or returned out-of-range values."
+    )
+
+
 def fetch_hrrr_gusts(fxx=1):
     cycle = _find_latest_hrrr_cycle()
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
@@ -50,44 +100,14 @@ def fetch_hrrr_gusts(fxx=1):
     H = Herbie(cycle, model="hrrr", product="sfc", fxx=fxx,
                save_dir=str(HERBIE_DIR), overwrite=False)
 
-    # Download ONLY the gust bytes into a file we control.
-    # searchString does a byte-range request - tiny download vs full 50MB file.
-    grib_path = H.download(searchString=":GUST:10 m above ground:")
-
-    # grib_path may be a Path or a list of Paths - normalise
-    if isinstance(grib_path, list):
-        grib_path = grib_path[0]
-    grib_path = Path(grib_path)
+    # Download the FULL sfc GRIB2 - no searchString.
+    # This writes to a stable, persistent path (no subset_ prefix).
+    grib_path = Path(H.download())
 
     if not grib_path.exists():
-        raise FileNotFoundError(f"Herbie download returned path that doesn't exist: {grib_path}")
+        raise FileNotFoundError(f"Expected GRIB2 file not found: {grib_path}")
 
-    # Open with cfgrib directly - no filter needed since file only has gust
-    datasets = cfgrib.open_datasets(
-        str(grib_path),
-        backend_kwargs={"indexpath": ""},
-    )
-
-    if not datasets:
-        raise ValueError("cfgrib found no datasets in the downloaded gust GRIB file.")
-
-    ds = next((d for d in datasets if len(d.data_vars) > 0), None)
-    if ds is None:
-        raise ValueError("All datasets from gust GRIB were empty.")
-
-    vname   = list(ds.data_vars)[0]
-
-    # .load() pulls ALL data into RAM right now, while the file still exists
-    gust_da = ds[vname].load()
-
-    # Sanity check: surface gusts should be 0-100 m/s
-    raw_max = float(np.nanmax(gust_da.values))
-    raw_min = float(np.nanmin(gust_da.values))
-    if raw_max > 150 or raw_min < 0:
-        raise ValueError(
-            f"Gust values out of physical range "
-            f"(min={raw_min:.1f}, max={raw_max:.1f} m/s). Wrong GRIB field."
-        )
+    gust_da = _open_gust_from_grib(grib_path)
 
     lat2d    = gust_da.coords["latitude"].values
     lon2d    = gust_da.coords["longitude"].values
