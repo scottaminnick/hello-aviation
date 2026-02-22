@@ -1,18 +1,13 @@
 """
 winds.py - HRRR Wind Gust fetcher for Colorado
 
-Key lessons learned:
-  - subset_* files (from searchString downloads) are deleted by Herbie before
-    cfgrib finishes reading them. Never use H.xarray() or H.download(searchString).
-  - H.download() with NO searchString saves a persistent full GRIB2 file.
-  - cfgrib filter_by_keys must be tight enough to match exactly one field,
-    or cfgrib iterates every message (slow + warning spam).
-  - .load() must be called immediately after open to pull data into RAM.
+Uses pygrib instead of cfgrib. pygrib reads GRIB2 synchronously —
+no lazy loading, no race conditions with temp files, much simpler API.
 """
 
 import os
 import time
-import cfgrib
+import pygrib
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -47,74 +42,55 @@ def _find_latest_hrrr_cycle(max_lookback_hours=6):
     return base - timedelta(hours=2)
 
 
-def _open_gust_from_grib(grib_path: Path) -> np.ndarray:
-    """
-    Try progressively looser cfgrib filters until we find the gust field.
-    Returns a loaded DataArray (already in RAM).
-    Never falls back to no filter at all - that opens every message.
-    """
-    filters_to_try = [
-        {"shortName": "gust", "typeOfLevel": "heightAboveGround", "level": 10},
-        {"shortName": "gust", "typeOfLevel": "heightAboveGround"},
-        {"shortName": "gust", "stepType": "instant"},
-        {"shortName": "gust"},
-    ]
-
-    for filt in filters_to_try:
-        try:
-            datasets = cfgrib.open_datasets(
-                str(grib_path),
-                backend_kwargs={"indexpath": ""},
-                filter_by_keys=filt,
-            )
-        except Exception:
-            continue
-
-        ds = next((d for d in datasets if len(d.data_vars) > 0), None)
-        if ds is None:
-            continue
-
-        vname   = list(ds.data_vars)[0]
-        gust_da = ds[vname].load()   # into RAM NOW
-
-        raw_max = float(np.nanmax(gust_da.values))
-        raw_min = float(np.nanmin(gust_da.values))
-
-        # Valid surface gusts: 0-100 m/s
-        if 0 <= raw_min and raw_max <= 150:
-            return gust_da   # good field found
-
-        # Wrong field (huge values) - try next filter
-        continue
-
-    raise ValueError(
-        f"Could not find a physically plausible gust field in {grib_path.name}. "
-        "All filters either matched nothing or returned out-of-range values."
-    )
-
-
 def fetch_hrrr_gusts(fxx=1):
     cycle = _find_latest_hrrr_cycle()
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
 
+    # Download the full sfc GRIB2 to a stable persistent path
     H = Herbie(cycle, model="hrrr", product="sfc", fxx=fxx,
                save_dir=str(HERBIE_DIR), overwrite=False)
-
-    # Download the FULL sfc GRIB2 - no searchString.
-    # This writes to a stable, persistent path (no subset_ prefix).
     grib_path = Path(H.download())
 
     if not grib_path.exists():
-        raise FileNotFoundError(f"Expected GRIB2 file not found: {grib_path}")
+        raise FileNotFoundError(f"GRIB2 file not found after download: {grib_path}")
 
-    gust_da = _open_gust_from_grib(grib_path)
+    # pygrib reads synchronously - no lazy loading, no race conditions
+    grbs = pygrib.open(str(grib_path))
 
-    lat2d    = gust_da.coords["latitude"].values
-    lon2d    = gust_da.coords["longitude"].values
-    lon2d    = np.where(lon2d > 180, lon2d - 360, lon2d)
-    gust_arr = gust_da.values
+    # Select the 10 m wind gust field
+    # pygrib.select() raises ValueError if nothing matches
+    try:
+        msgs = grbs.select(name="Wind speed (gust)", typeOfLevel="heightAboveGround", level=10)
+    except ValueError:
+        # Try a broader search if the exact name doesn't match
+        try:
+            msgs = grbs.select(shortName="gust", typeOfLevel="heightAboveGround", level=10)
+        except ValueError:
+            grbs.close()
+            raise ValueError(
+                "Could not find 'Wind speed (gust)' at 10 m above ground in HRRR sfc file. "
+                "Check pygrib field names with grbs.read() to debug."
+            )
 
-    # Clip to Colorado
+    msg = msgs[0]
+
+    # .values reads the full array into RAM immediately - synchronous, safe
+    gust_arr, lat2d, lon2d = msg.data()
+    grbs.close()
+
+    # HRRR longitudes are 0-360, convert to -180/+180
+    lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
+
+    # Sanity check: surface gusts should be 0-100 m/s
+    raw_max = float(np.nanmax(gust_arr))
+    raw_min = float(np.nanmin(gust_arr))
+    if raw_max > 150 or raw_min < 0:
+        raise ValueError(
+            f"Gust values out of physical range "
+            f"(min={raw_min:.1f}, max={raw_max:.1f} m/s). Wrong GRIB field."
+        )
+
+    # Clip to Colorado bounding box
     mask = (
         (lat2d >= CO_LAT_MIN) & (lat2d <= CO_LAT_MAX) &
         (lon2d >= CO_LON_MIN) & (lon2d <= CO_LON_MAX)
@@ -126,6 +102,7 @@ def fetch_hrrr_gusts(fxx=1):
     r0, r1 = rows.min(), rows.max() + 1
     c0, c1 = cols.min(), cols.max() + 1
 
+    # Downsample 2x (~6 km effective resolution, ~7500 points for Leaflet)
     step    = 2
     lat_ds  = lat2d[r0:r1, c0:c1][::step, ::step]
     lon_ds  = lon2d[r0:r1, c0:c1][::step, ::step]
