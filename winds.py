@@ -23,8 +23,8 @@ CO_LAT_MAX = 41.2
 CO_LON_MIN = -109.2
 CO_LON_MAX = -101.9
 
-# Simple in-memory cache
-_CACHE = {"ts": 0.0, "data": None}
+# In-memory cache - keyed by fxx so different hours don't collide
+_CACHE = {}
 
 
 def _now_utc_hour_naive():
@@ -51,15 +51,19 @@ def _find_latest_hrrr_cycle(max_lookback_hours=6):
     return base - timedelta(hours=2)
 
 
-def fetch_hrrr_gusts(fxx=0):
+def fetch_hrrr_gusts(fxx=1):
     """
     Download HRRR surface wind gusts over Colorado and return
     a JSON-serialisable dict for the Leaflet map.
+
+    Note: fxx=0 (analysis hour) often has uninitialized or accumulated
+    gust values in HRRR. fxx=1 is the first reliable forecast hour.
+    We filter for stepType='instant' to get the instantaneous gust field,
+    not the max-over-period accumulated field.
     """
     cycle = _find_latest_hrrr_cycle()
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
 
-    # Build Herbie object and download the full GRIB2 file
     H = Herbie(
         cycle,
         model="hrrr",
@@ -69,24 +73,26 @@ def fetch_hrrr_gusts(fxx=0):
         overwrite=False,
     )
 
-    # H.download() returns the local Path to the full GRIB2 file
     local_path = H.download()
 
-    # Open directly with cfgrib - filter for gust shortName only
-    # indexpath='' keeps the index in memory rather than writing to disk
+    # Filter for instantaneous gust (not max-over-period)
     datasets = cfgrib.open_datasets(
         str(local_path),
         backend_kwargs={"indexpath": ""},
-        filter_by_keys={"shortName": "gust"},
+        filter_by_keys={"shortName": "gust", "stepType": "instant"},
     )
 
-    if not datasets:
-        raise ValueError(
-            "No gust variable found in HRRR sfc GRIB2. "
-            "shortName='gust' not present in this file."
+    # Fallback without stepType if instant filter finds nothing
+    if not datasets or all(len(d.data_vars) == 0 for d in datasets):
+        datasets = cfgrib.open_datasets(
+            str(local_path),
+            backend_kwargs={"indexpath": ""},
+            filter_by_keys={"shortName": "gust"},
         )
 
-    # Grab the first dataset that has data variables
+    if not datasets:
+        raise ValueError("No gust variable found in HRRR sfc GRIB2.")
+
     ds = None
     for candidate_ds in datasets:
         if len(candidate_ds.data_vars) > 0:
@@ -96,21 +102,12 @@ def fetch_hrrr_gusts(fxx=0):
     if ds is None:
         raise ValueError("All gust datasets were empty.")
 
-    # Get the first (should be only) data variable
     vname = list(ds.data_vars)[0]
-    gust_da = ds[vname]
+    gust_da = ds[vname].load()  # load into RAM immediately
 
-    # Load ALL data into RAM immediately - critical to avoid lazy read issues
-    gust_da = gust_da.load()
-
-    # Get lat/lon grids - HRRR uses 2D arrays on Lambert Conformal projection
     lat2d = gust_da.coords["latitude"].values
     lon2d = gust_da.coords["longitude"].values
-
-    # HRRR longitudes are 0-360, convert to -180/+180
     lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
-
-    # Gust values in m/s
     gust_arr = gust_da.values
 
     # Clip to Colorado
@@ -128,18 +125,14 @@ def fetch_hrrr_gusts(fxx=0):
 
     lat_co  = lat2d[r0:r1, c0:c1]
     lon_co  = lon2d[r0:r1, c0:c1]
-    gust_co = gust_arr[r0:r1, c0:c1]
+    gust_kt = gust_arr[r0:r1, c0:c1] * 1.94384  # m/s -> knots
 
-    # Convert m/s to knots
-    gust_kt = gust_co * 1.94384
-
-    # Downsample 2x (~6 km effective resolution, ~7500 points)
+    # Downsample 2x (~6 km, ~7500 points for Leaflet performance)
     step = 2
     lat_ds  = lat_co[::step, ::step]
     lon_ds  = lon_co[::step, ::step]
     gust_ds = gust_kt[::step, ::step]
 
-    # Build point list for Leaflet
     points = []
     ny, nx = lat_ds.shape
     for i in range(ny):
@@ -166,13 +159,18 @@ def fetch_hrrr_gusts(fxx=0):
     }
 
 
-def get_hrrr_gusts_cached(fxx=0, ttl_seconds=600):
+def get_hrrr_gusts_cached(fxx=1, ttl_seconds=600):
     """
-    Cache wrapper - re-fetches at most every ttl_seconds.
-    HRRR updates hourly so 600s (10 min) is plenty.
+    Cache wrapper keyed by fxx so different forecast hours don't overwrite
+    each other. Re-fetches at most every ttl_seconds.
     """
     now = time.time()
-    if _CACHE["data"] is None or (now - _CACHE["ts"]) > ttl_seconds:
-        _CACHE["data"] = fetch_hrrr_gusts(fxx=fxx)
-        _CACHE["ts"] = now
-    return _CACHE["data"]
+    cached = _CACHE.get(fxx)
+
+    if cached is None or (now - cached["ts"]) > ttl_seconds:
+        _CACHE[fxx] = {
+            "ts":   now,
+            "data": fetch_hrrr_gusts(fxx=fxx),
+        }
+
+    return _CACHE[fxx]["data"]
