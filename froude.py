@@ -71,50 +71,119 @@ def _find_latest_hrrr_cycle(max_lookback_hours=6):
     return base - timedelta(hours=2)
 
 
-def _download(cycle, product, fxx):
-    """Download a HRRR GRIB2 file and return its local Path."""
+# ── searchString subsets ─────────────────────────────────────────────────────
+# Download only the fields we need instead of the full 200 MB prs file.
+# Herbie uses byte-range requests to fetch just these messages (~6 MB total).
+#
+# PRS fields needed:
+#   UGRD + VGRD at 700 mb  (wind for U_perp)
+#   TMP  at 850 mb + 500 mb (temperature for Brunt-Väisälä)
+#   HGT  at 850 mb + 500 mb (geopotential height for Δz)
+PRS_SEARCH = r"(UGRD|VGRD).*700 mb|(TMP|HGT).*(850|500) mb"
+
+# SFC field needed: orography (model terrain height MSL)
+SFC_SEARCH = r"OROG"
+
+_CLIP_IDX = {}   # cache row/col slice indices by grid shape
+
+
+def _download_subset(cycle, product, fxx, searchString):
+    """Download a field subset via Herbie byte-range and return Path."""
     H = Herbie(cycle, model="hrrr", product=product, fxx=fxx,
                save_dir=str(HERBIE_DIR), overwrite=False)
-    p = Path(H.download())
+    result = H.download(searchString=searchString)
+    p = Path(result) if result else None
+    if p is None or not p.exists():
+        # Fallback: full file (rare, only if .idx malformed)
+        p = Path(H.download())
     if not p.exists():
-        raise FileNotFoundError(f"Download failed: {p}")
+        raise FileNotFoundError(f"Download failed for {product} {cycle} F{fxx:02d}")
     return p
 
 
-def _read_field(grib_path, name, level, typeOfLevel="isobaricInhPa"):
-    """
-    Open a GRIB2 file with pygrib, select one message, read into RAM.
-    Returns (data_2d, lat_2d, lon_2d).  Longitudes converted to ±180.
-    """
-    grbs = pygrib.open(str(grib_path))
-    try:
-        msgs = grbs.select(name=name, typeOfLevel=typeOfLevel, level=level)
-    except ValueError:
-        grbs.close()
-        raise ValueError(
-            f"Field not found: name='{name}' typeOfLevel='{typeOfLevel}' level={level} "
-            f"in {grib_path.name}"
+def _get_clip_idx(lat2d, lon2d, step=2):
+    """Compute and cache the Colorado row/col slice indices."""
+    key = lat2d.shape
+    if key not in _CLIP_IDX:
+        mask = (
+            (lat2d >= CO_LAT_MIN) & (lat2d <= CO_LAT_MAX) &
+            (lon2d >= CO_LON_MIN) & (lon2d <= CO_LON_MAX)
         )
-    data, lat2d, lon2d = msgs[0].data()
+        rows, cols = np.where(mask)
+        if len(rows) == 0:
+            raise ValueError("No HRRR grid points inside Colorado bounding box.")
+        _CLIP_IDX[key] = (rows.min(), rows.max() + 1,
+                          cols.min(), cols.max() + 1, step)
+    return _CLIP_IDX[key]
+
+
+def _clip(arr, idx):
+    r0, r1, c0, c1, step = idx
+    return arr[r0:r1, c0:c1][::step, ::step]
+
+
+def _read_prs_subset(subset_path):
+    """
+    Single pass through the small (~6 MB) prs subset file.
+    Returns clipped Colorado arrays for U700, V700, T850, T500, GH850, GH500
+    plus lat_co, lon_co.
+    """
+    want = {
+        ("U component of wind",    700): "U700",
+        ("V component of wind",    700): "V700",
+        ("Temperature",            850): "T850",
+        ("Temperature",            500): "T500",
+        ("Geopotential height",    850): "GH850",
+        ("Geopotential height",    500): "GH500",
+    }
+    fields = {}
+    lat_co = lon_co = None
+    idx = None
+
+    grbs = pygrib.open(str(subset_path))
+    for grb in grbs:
+        if grb.typeOfLevel != "isobaricInhPa":
+            continue
+        key = (grb.name, grb.level)
+        if key not in want:
+            continue
+        data, lat2d, lon2d = grb.data()
+        lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
+        if idx is None:
+            idx = _get_clip_idx(lat2d, lon2d)
+            r0, r1, c0, c1, step = idx
+            lat_co = lat2d[r0:r1, c0:c1][::step, ::step]
+            lon_co = lon2d[r0:r1, c0:c1][::step, ::step]
+        fields[want[key]] = _clip(data, idx)
+        del data, lat2d, lon2d
+
     grbs.close()
-    lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
-    return data, lat2d, lon2d
+
+    missing = [k for k in want.values() if k not in fields]
+    if missing:
+        raise ValueError(f"Missing prs fields: {missing} in {subset_path.name}")
+
+    return (lat_co, lon_co,
+            fields["U700"], fields["V700"],
+            fields["T850"], fields["T500"],
+            fields["GH850"], fields["GH500"])
 
 
-def _clip_to_colorado(arr, lat2d, lon2d, step=2):
-    """Clip a 2-D array to the Colorado bounding box and downsample."""
-    mask = (
-        (lat2d >= CO_LAT_MIN) & (lat2d <= CO_LAT_MAX) &
-        (lon2d >= CO_LON_MIN) & (lon2d <= CO_LON_MAX)
-    )
-    rows, cols = np.where(mask)
-    if len(rows) == 0:
-        raise ValueError("No grid points inside Colorado bounding box.")
-    r0, r1 = rows.min(), rows.max() + 1
-    c0, c1 = cols.min(), cols.max() + 1
-    return (arr[r0:r1, c0:c1][::step, ::step],
-            lat2d[r0:r1, c0:c1][::step, ::step],
-            lon2d[r0:r1, c0:c1][::step, ::step])
+def _read_sfc_orography(subset_path, idx):
+    """Read orography from the small sfc subset file."""
+    grbs = pygrib.open(str(subset_path))
+    orog = None
+    for grb in grbs:
+        if grb.typeOfLevel == "surface" and "rog" in grb.name.lower():
+            data, lat2d, lon2d = grb.data()
+            lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
+            if idx is None:
+                idx = _get_clip_idx(lat2d, lon2d)
+            orog = _clip(data, idx)
+            del data, lat2d, lon2d
+            break
+    grbs.close()
+    return orog
 
 
 # ── Science ───────────────────────────────────────────────────────────────────
@@ -201,44 +270,22 @@ def fetch_froude(cycle_utc: str, fxx: int = 1) -> dict:
     ).replace(tzinfo=None)
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
 
-    # ── Download both products ────────────────────────────────────────────────
-    prs_path = _download(cycle, "prs", fxx)
-    sfc_path = _download(cycle, "sfc", fxx)
+    # ── Download field subsets (tiny byte-range files, not full 200 MB) ────────
+    prs_path = _download_subset(cycle, "prs", fxx, PRS_SEARCH)
+    sfc_path = _download_subset(cycle, "sfc", fxx, SFC_SEARCH)
 
-    # ── Read atmospheric fields from prs file ─────────────────────────────────
-    # Wind at 700 mb (≈ mountain-crest level)
-    U700, lat2d, lon2d = _read_field(prs_path, "U component of wind", 700)
-    V700, _,    _      = _read_field(prs_path, "V component of wind", 700)
+    # ── Single-pass reads — clip to Colorado immediately ──────────────────────
+    lat_co, lon_co, U700_co, V700_co, T850_co, T500_co, GH850_co, GH500_co =         _read_prs_subset(prs_path)
 
-    # Temperature + geopotential height for stability calculation
-    T850,  _, _ = _read_field(prs_path, "Temperature",        850)
-    T500,  _, _ = _read_field(prs_path, "Temperature",        500)
-    GH850, _, _ = _read_field(prs_path, "Geopotential height", 850)
-    GH500, _, _ = _read_field(prs_path, "Geopotential height", 500)
+    idx    = _get_clip_idx.__wrapped__ if hasattr(_get_clip_idx, "__wrapped__") else None
+    # Reuse cached clip index from prs read for sfc
+    prs_shape_key = next(iter(_CLIP_IDX))
+    idx = _CLIP_IDX[prs_shape_key]
+    orog_co = _read_sfc_orography(sfc_path, idx)
 
-    # ── Read terrain from sfc file ────────────────────────────────────────────
-    # HRRR sfc carries an "Orography" field – model terrain MSL in metres.
-    # This is collocated with the prs grid, so no interpolation needed.
-    try:
-        orog, _, _ = _read_field(sfc_path, "Orography", 0, typeOfLevel="surface")
-    except ValueError:
-        # Fallback name used in some HRRR builds
-        try:
-            orog, _, _ = _read_field(sfc_path, "Geometric height", 0,
-                                     typeOfLevel="surface")
-        except ValueError:
-            # Last resort: use geopotential height at 850 mb as a rough proxy
-            orog = GH850
-
-    # ── Clip everything to Colorado ───────────────────────────────────────────
-    step = 2
-    U700_co, lat_co, lon_co = _clip_to_colorado(U700, lat2d, lon2d, step)
-    V700_co, _,      _      = _clip_to_colorado(V700, lat2d, lon2d, step)
-    T850_co, _,      _      = _clip_to_colorado(T850, lat2d, lon2d, step)
-    T500_co, _,      _      = _clip_to_colorado(T500, lat2d, lon2d, step)
-    GH850_co, _,     _      = _clip_to_colorado(GH850, lat2d, lon2d, step)
-    GH500_co, _,     _      = _clip_to_colorado(GH500, lat2d, lon2d, step)
-    orog_co, _,      _      = _clip_to_colorado(orog, lat2d, lon2d, step)
+    if orog_co is None:
+        # Fallback if orography field not found: use GH850 as terrain proxy
+        orog_co = GH850_co
 
     # ── Compute Froude components ─────────────────────────────────────────────
     N = _brunt_vaisala(T850_co, T500_co, GH850_co, GH500_co)   # s⁻¹
