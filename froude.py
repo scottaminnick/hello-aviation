@@ -272,13 +272,17 @@ def fetch_froude(cycle_utc: str, fxx: int = 1) -> dict:
 
     # ── Download + read under global lock (one GRIB operation at a time) ───────
     from prefetch import GRIB_LOCK
-    with GRIB_LOCK:
+    if not GRIB_LOCK.acquire(timeout=30):
+        raise RuntimeError("GRIB_LOCK timeout — another download is in progress, retry in a moment.")
+    try:
         prs_path = _download_subset(cycle, "prs", fxx, PRS_SEARCH)
         sfc_path = _download_subset(cycle, "sfc", fxx, SFC_SEARCH)
         lat_co, lon_co, U700_co, V700_co, T850_co, T500_co, GH850_co, GH500_co =             _read_prs_subset(prs_path)
         prs_shape_key = next(iter(_CLIP_IDX))
         idx = _CLIP_IDX[prs_shape_key]
         orog_co = _read_sfc_orography(sfc_path, idx)
+    finally:
+        GRIB_LOCK.release()
 
     if orog_co is None:
         # Fallback if orography field not found: use GH850 as terrain proxy
