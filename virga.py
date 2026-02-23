@@ -180,9 +180,13 @@ def fetch_virga(cycle_utc: str, fxx: int = 1) -> dict:
     ).replace(tzinfo=None)
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
 
-    with _DOWNLOAD_LOCK:
+    if not _DOWNLOAD_LOCK.acquire(timeout=30):
+        raise RuntimeError("GRIB_LOCK timeout — another download is in progress, retry in a moment.")
+    try:
         subset_path = _download_subset(cycle, fxx)
         lat_co, lon_co, T_co, Td_co, U_co, V_co = _read_subset_clipped(subset_path)
+    finally:
+        _DOWNLOAD_LOCK.release()
     shape = lat_co.shape
 
     rh_co = {lev: _rh(T_co[lev], Td_co[lev]) for lev in LEVELS_MB}
