@@ -21,6 +21,12 @@ import time
 import logging
 from datetime import timezone
 
+# Global lock shared across all products.
+# Only one GRIB download/process runs at a time to stay within memory budget.
+# Import this in any module that downloads HRRR data:
+#   from prefetch import GRIB_LOCK
+GRIB_LOCK = threading.Lock()
+
 log = logging.getLogger("prefetch")
 
 MAX_FXX = 12
@@ -52,17 +58,20 @@ def _fetch_one(product, cycle_utc, fxx):
     """Call the appropriate cached fetcher for one (product, fxx) pair."""
     set_status(product, fxx, "loading")
     try:
-        if product == "winds":
-            from winds import get_hrrr_gusts_cached
-            get_hrrr_gusts_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=3600)
+        # Acquire global lock so background prefetch never competes with
+        # a user-triggered download for the same memory budget.
+        with GRIB_LOCK:
+            if product == "winds":
+                from winds import get_hrrr_gusts_cached
+                get_hrrr_gusts_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=3600)
 
-        elif product == "froude":
-            from froude import get_froude_cached
-            get_froude_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=3600)
+            elif product == "froude":
+                from froude import get_froude_cached
+                get_froude_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=3600)
 
-        elif product == "virga":
-            from virga import get_virga_cached
-            get_virga_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=3600)
+            elif product == "virga":
+                from virga import get_virga_cached
+                get_virga_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=3600)
 
         set_status(product, fxx, "ready")
         log.info(f"[prefetch] {product} F{fxx:02d} ready")
