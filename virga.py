@@ -42,7 +42,7 @@ _CLIP_IDX = {}   # cache (r0,r1,c0,c1,step) by grid shape
 
 # Use the global GRIB lock shared with prefetch/froude/winds
 # so background prefetch and user requests never compete for memory.
-from prefetch import GRIB_LOCK as _DOWNLOAD_LOCK
+from grib_lock import GRIB_LOCK as _DOWNLOAD_LOCK
 
 
 # ── Herbie helpers ────────────────────────────────────────────────────────────
