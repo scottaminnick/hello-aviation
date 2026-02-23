@@ -15,13 +15,16 @@ def fetch_metars(stations: list[str]) -> dict:
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
 
-    # AWC returns JSON for format=json; this should now be safe.
-    data = r.json()
+    # AWC occasionally returns an empty body — guard against it
+    try:
+        data = r.json()
+    except Exception:
+        data = []
 
     return {
         "stations": stations,
         "count": len(data) if isinstance(data, list) else None,
-        "data": data,
+        "data": data if isinstance(data, list) else [],
         "source": "aviationweather.gov/api/data/metar",
     }
 
@@ -34,8 +37,6 @@ def get_metars_cached(stations: list[str], ttl_seconds: int = 120) -> dict:
 
 from datetime import datetime, timezone
 
-from datetime import datetime, timezone
-
 def summarize_metars(metar_data: dict) -> list[dict]:
     """
     Convert AWC METAR JSON into a small, consistent summary list for the UI.
@@ -43,7 +44,6 @@ def summarize_metars(metar_data: dict) -> list[dict]:
     out: list[dict] = []
 
     for m in metar_data.get("data", []):
-        # Time: prefer reportTime; fallback to obsTime (epoch seconds)
         rt = m.get("reportTime")
         if rt:
             time_utc = rt.replace(".000Z", "Z")
@@ -58,7 +58,6 @@ def summarize_metars(metar_data: dict) -> list[dict]:
             else:
                 time_utc = "—"
 
-        # Wind formatting
         wdir = m.get("wdir")
         wspd = m.get("wspd")
         wgst = m.get("wgst")
@@ -69,7 +68,6 @@ def summarize_metars(metar_data: dict) -> list[dict]:
             if wgst is not None:
                 wind += f"G{int(wgst)}"
 
-        # Ceiling/cover quick read
         cover = m.get("cover") or "—"
         clouds = m.get("clouds") or []
         bases = [c.get("base") for c in clouds if c.get("base") is not None]
