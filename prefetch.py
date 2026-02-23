@@ -106,7 +106,7 @@ def _prefetch_loop():
 
             # Process each available hour × each product (skip already-ready ones)
             for fxx in available_hours:
-                for product in ["winds", "froude", "virga"]:
+                for product in ["winds", "froude"]:   # virga excluded until stable
                     with _STATUS_LOCK:
                         current = _STATUS[product].get(fxx, "pending")
                     if current in ("ready", "loading"):
