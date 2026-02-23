@@ -40,9 +40,9 @@ SEARCH_STRING = f"TMP:{_LEVEL_LIST}|DPT:{_LEVEL_LIST}|UGRD:{_LEVEL_LIST}|VGRD:{_
 _CACHE    = {}
 _CLIP_IDX = {}   # cache (r0,r1,c0,c1,step) by grid shape
 
-# Prevent concurrent GRIB downloads from competing for memory
-import threading
-_DOWNLOAD_LOCK = threading.Lock()
+# Use the global GRIB lock shared with prefetch/froude/winds
+# so background prefetch and user requests never compete for memory.
+from prefetch import GRIB_LOCK as _DOWNLOAD_LOCK
 
 
 # ── Herbie helpers ────────────────────────────────────────────────────────────
