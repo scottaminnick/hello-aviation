@@ -87,17 +87,27 @@ SFC_SEARCH = r"OROG"
 _CLIP_IDX = {}   # cache row/col slice indices by grid shape
 
 
+# Max acceptable subset size — if larger, NOMADS returned the full file
+_MAX_SUBSET_MB = 50
+
 def _download_subset(cycle, product, fxx, searchString):
-    """Download a field subset via Herbie byte-range and return Path."""
+    """
+    Download a field subset via Herbie byte-range.
+    Raises RuntimeError if the file exceeds _MAX_SUBSET_MB, which means
+    the source (NOMADS) didn't support byte-range and returned the full file.
+    """
     H = Herbie(cycle, model="hrrr", product=product, fxx=fxx,
                save_dir=str(HERBIE_DIR), overwrite=False)
     result = H.download(searchString=searchString)
     p = Path(result) if result else None
     if p is None or not p.exists():
-        # Fallback: full file (rare, only if .idx malformed)
-        p = Path(H.download())
-    if not p.exists():
         raise FileNotFoundError(f"Download failed for {product} {cycle} F{fxx:02d}")
+    size_mb = p.stat().st_size / 1_000_000
+    if size_mb > _MAX_SUBSET_MB:
+        raise RuntimeError(
+            f"Downloaded file is {size_mb:.0f} MB — NOMADS returned full file "
+            f"(no byte-range support). Try again when data moves to AWS (~1-2 hrs)."
+        )
     return p
 
 
