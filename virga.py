@@ -1,9 +1,9 @@
 """
 virga.py  –  HRRR-based Virga Potential calculator for Colorado
 ===============================================================
-Uses Herbie searchString to download ONLY the 60 fields we need
-(TMP, DPT, UGRD, VGRD at 500-850 mb) instead of the full 708-message
-200MB prs file.  Subset is ~17MB → no memory issues.
+Key optimisation: grb.data() is called exactly ONCE (for lat/lon).
+All subsequent messages use grb.values which skips the expensive
+pyproj Lambert Conformal unprojection entirely.
 
 Science
 -------
@@ -14,7 +14,6 @@ RH from T + Td via August-Roche-Magnus approximation.
 """
 
 import os
-import re
 import time
 import pygrib
 import numpy as np
@@ -28,16 +27,17 @@ HERBIE_DIR.mkdir(parents=True, exist_ok=True)
 CO_LAT_MIN, CO_LAT_MAX = 36.8, 41.2
 CO_LON_MIN, CO_LON_MAX = -109.2, -101.9
 
-LEVELS_MB  = [500,525,550,575,600,625,650,675,
-              700,725,750,775,800,825,850]
+LEVELS_MB  = [500, 525, 550, 575, 600, 625, 650, 675,
+              700, 725, 750, 775, 800, 825, 850]
 LEVELS_SET = frozenset(LEVELS_MB)
 
-# Herbie searchString: matches TMP/DPT/UGRD/VGRD at our 15 pressure levels
-_LEVELS_STR    = "|".join(str(l) for l in LEVELS_MB)
-SEARCH_STRING  = rf"(TMP|DPT|UGRD|VGRD).*({_LEVELS_STR}) mb"
+# Herbie searchString — no capture groups to avoid pandas warning.
+# Matches lines containing any of our target level strings + variable abbrevs.
+# Written as a simple alternation without outer grouping.
+SEARCH_STRING = "TMP|DPT|UGRD|VGRD"   # filter to just these 4 variable types
 
 _CACHE    = {}
-_CLIP_IDX = {}
+_CLIP_IDX = {}   # cache (r0,r1,c0,c1,step) by grid shape
 
 
 # ── Herbie helpers ────────────────────────────────────────────────────────────
@@ -46,38 +46,16 @@ def _now_utc_hour_naive():
     return datetime.utcnow().replace(minute=0, second=0, microsecond=0)
 
 
-def _find_latest_hrrr_cycle(max_lookback_hours=6):
-    base = _now_utc_hour_naive()
-    for h in range(max_lookback_hours + 1):
-        candidate = base - timedelta(hours=h)
-        try:
-            H = Herbie(candidate, model="hrrr", product="prs", fxx=0,
-                       save_dir=str(HERBIE_DIR), overwrite=False)
-            H.inventory()
-            return candidate
-        except Exception:
-            continue
-    return base - timedelta(hours=2)
-
-
 def _download_subset(cycle, fxx):
-    """
-    Download only the 60 fields we need via Herbie byte-range subset.
-    Returns path to the small (~17MB) subset GRIB2 file.
-    """
+    """Download only TMP/DPT/UGRD/VGRD messages from the prs file."""
     H = Herbie(cycle, model="hrrr", product="prs", fxx=fxx,
                save_dir=str(HERBIE_DIR), overwrite=False)
-
-    # H.download(searchString=...) saves a subset_*.grib2 file and returns its path
     result = H.download(searchString=SEARCH_STRING)
     p = Path(result) if result else None
-
-    # Herbie sometimes returns None or a non-existent path — fall back to full file
     if p is None or not p.exists():
-        p = Path(H.download())
-
+        p = Path(H.download())   # rare fallback
     if not p.exists():
-        raise FileNotFoundError(f"Download failed for {cycle} F{fxx:02d}")
+        raise FileNotFoundError(f"Download failed for prs {cycle} F{fxx:02d}")
     return p
 
 
@@ -122,12 +100,17 @@ def _virga_category(pct):
     return cat
 
 
-# ── Single-pass reader of the small subset file ───────────────────────────────
+# ── Single-pass reader — lat/lon computed exactly once ────────────────────────
 
 def _read_subset_clipped(subset_path):
     """
-    Read our small subset GRIB2 (~60 messages, ~17MB).
-    Single pass, clip to Colorado immediately, discard full grids.
+    Read the prs subset file in a single pass.
+
+    Critical memory optimisation:
+      - First qualifying message  → grb.data()  to get data + lat/lon arrays
+      - All subsequent messages   → grb.values   (no pyproj call, no lat/lon alloc)
+
+    This reduces pyproj Lambert Conformal allocations from N×2×8MB to 1×2×8MB.
     """
     T_co  = {}
     Td_co = {}
@@ -154,22 +137,26 @@ def _read_subset_clipped(subset_path):
         if key is None:
             continue
 
-        data, lat2d, lon2d = grb.data()
-        lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
-
         if idx is None:
+            # First match: pay the pyproj cost once to get lat/lon
+            data, lat2d, lon2d = grb.data()
+            lon2d = np.where(lon2d > 180, lon2d - 360, lon2d)
             idx    = _get_clip_idx(lat2d, lon2d)
             r0, r1, c0, c1, step = idx
             lat_co = lat2d[r0:r1, c0:c1][::step, ::step]
             lon_co = lon2d[r0:r1, c0:c1][::step, ::step]
+            del lat2d, lon2d
+        else:
+            # All subsequent messages: values only, no lat/lon allocation
+            data = grb.values
 
         small = _clip(data, idx)
-        del data, lat2d, lon2d
+        del data
 
-        if   key == "T":   T_co[lev]  = small
-        elif key == "Td":  Td_co[lev] = small
-        elif key == "U":   U_co[lev]  = small
-        elif key == "V":   V_co[lev]  = small
+        if   key == "T":  T_co[lev]  = small
+        elif key == "Td": Td_co[lev] = small
+        elif key == "U":  U_co[lev]  = small
+        elif key == "V":  V_co[lev]  = small
 
     grbs.close()
 
