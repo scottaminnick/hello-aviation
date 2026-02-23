@@ -271,7 +271,7 @@ def fetch_froude(cycle_utc: str, fxx: int = 1) -> dict:
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
 
     # ── Download + read under global lock (one GRIB operation at a time) ───────
-    from prefetch import GRIB_LOCK
+    from grib_lock import GRIB_LOCK
     if not GRIB_LOCK.acquire(timeout=30):
         raise RuntimeError("GRIB_LOCK timeout — another download is in progress, retry in a moment.")
     try:
