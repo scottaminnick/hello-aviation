@@ -81,9 +81,10 @@ def _fetch_one(product, cycle_utc, fxx):
 
     except Exception as e:
         msg = str(e).lower()
-        if any(k in msg for k in ["not found", "did not find", "no such file", "404"]):
+        if any(k in msg for k in ["not found", "did not find", "no such file", "404",
+                                   "nomads", "full file", "byte-range"]):
             set_status(product, fxx, "unavailable")
-            log.info(f"[prefetch] {product} F{fxx:02d} unavailable (not on AWS yet)")
+            log.info(f"[prefetch] {product} F{fxx:02d} unavailable (NOMADS or not on AWS yet)")
         else:
             set_status(product, fxx, "error")
             log.warning(f"[prefetch] {product} F{fxx:02d} error: {e}")
