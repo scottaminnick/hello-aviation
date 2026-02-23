@@ -575,6 +575,16 @@ FROUDE_MAP_TEMPLATE = """
     <span id="progress-pct">--%</span>
   </div>
   <div id="hours-wrap"><label>FCST HOUR</label></div>
+
+  <!-- Opacity slider -->
+  <div id="opacity-wrap" style="display:flex;align-items:center;gap:0.5rem;background:rgba(88,166,255,0.06);border:1px solid var(--border);border-radius:6px;padding:0.3rem 0.75rem;">
+    <label for="opacity-slider" style="font-size:0.72rem;color:var(--muted);white-space:nowrap;">OPACITY</label>
+    <input type="range" id="opacity-slider" min="10" max="100" step="5" value="65"
+      style="-webkit-appearance:none;appearance:none;width:90px;height:4px;border-radius:2px;background:var(--border);outline:none;cursor:pointer;"
+      oninput="updateOpacity(this.value)" />
+    <span id="opacity-label" style="font-size:0.8rem;font-weight:700;color:var(--accent);min-width:2.5rem;">65%</span>
+  </div>
+
   <div id="meta-strip">
     <span>VALID <b id="m-valid">--</b></span>
     <span>PTS <b id="m-pts">--</b></span>
@@ -592,17 +602,17 @@ FROUDE_MAP_TEMPLATE = """
     <span class="leg-sub">low</span>
   </div>
   <div class="leg-row">
-    <div class="leg-swatch" style="background:#f1c40f"></div>
+    <div class="leg-swatch" style="background:#00bcd4"></div>
     0.5 &le; Fr &lt; 0.8 &mdash; Transitional
     <span class="leg-sub">mod</span>
   </div>
   <div class="leg-row">
-    <div class="leg-swatch" style="background:#e74c3c"></div>
+    <div class="leg-swatch" style="background:#e91e8c"></div>
     0.8 &le; Fr &le; 1.5 &mdash; Resonant
     <span class="leg-sub">HIGH</span>
   </div>
   <div class="leg-row">
-    <div class="leg-swatch" style="background:#e67e22"></div>
+    <div class="leg-swatch" style="background:#7b1fa2"></div>
     Fr &gt; 1.5 &mdash; Flow over
     <span class="leg-sub">mod</span>
   </div>
@@ -616,13 +626,27 @@ FROUDE_MAP_TEMPLATE = """
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
+// ── opacity control ──────────────────────────────────────────────────────────
+let currentOpacity = 0.65;
+
+function updateOpacity(val) {
+  currentOpacity = parseInt(val) / 100;
+  document.getElementById('opacity-label').textContent = val + '%';
+  // Update all rectangles in the active layer without re-fetching data
+  if (froudeLayer) {
+    froudeLayer.eachLayer(function(rect) {
+      rect.setStyle({ fillOpacity: currentOpacity });
+    });
+  }
+}
+
 // ── colour scale ──────────────────────────────────────────────────────────────
-// cat: 1=splitting(green) 2=transitional(yellow) 3=resonant(red) 4=flow-over(orange)
+// cat: 1=splitting(green) 2=transitional(cyan) 3=resonant(magenta) 4=flow-over(purple)
 function froudeColor(cat) {
-  if (cat === 3) return '#e74c3c';   // resonant  – HIGH
-  if (cat === 2) return '#f1c40f';   // transitional
-  if (cat === 4) return '#e67e22';   // flow-over
-  return '#2ecc71';                  // splitting – low
+  if (cat === 3) return '#e91e8c';   // resonant  – HIGH (magenta)
+  if (cat === 2) return '#00bcd4';   // transitional (cyan)
+  if (cat === 4) return '#7b1fa2';   // flow-over (deep purple)
+  return '#2ecc71';                  // splitting – low (green)
 }
 
 // ── map ───────────────────────────────────────────────────────────────────────
@@ -749,7 +773,7 @@ async function loadFroude(cycle_utc, fxx) {
       const color = froudeColor(p.cat);
       const rect  = L.rectangle(
         [[p.lat - half, p.lon - halfLon], [p.lat + half, p.lon + halfLon]],
-        { renderer: renderer, color: color, fillColor: color, fillOpacity: 0.65, weight: 0 }
+        { renderer: renderer, color: color, fillColor: color, fillOpacity: currentOpacity, weight: 0 }
       );
       rect.bindPopup(
         '<b>Fr = ' + p.fr.toFixed(2) + '</b><br>' +
