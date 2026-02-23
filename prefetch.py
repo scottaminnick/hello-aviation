@@ -58,9 +58,14 @@ def _fetch_one(product, cycle_utc, fxx):
     """Call the appropriate cached fetcher for one (product, fxx) pair."""
     set_status(product, fxx, "loading")
     try:
-        # Acquire global lock so background prefetch never competes with
-        # a user-triggered download for the same memory budget.
-        with GRIB_LOCK:
+        # Acquire global lock — timeout so prefetch never starves user requests.
+        # If lock is busy (user request in progress), skip and retry next cycle.
+        if not GRIB_LOCK.acquire(timeout=10):
+            log.info(f"[prefetch] {product} F{fxx:02d} skipped (lock busy, will retry)")
+            set_status(product, fxx, "pending")
+            return
+
+        try:
             if product == "winds":
                 from winds import get_hrrr_gusts_cached
                 get_hrrr_gusts_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=3600)
@@ -72,6 +77,8 @@ def _fetch_one(product, cycle_utc, fxx):
             elif product == "virga":
                 from virga import get_virga_cached
                 get_virga_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=3600)
+        finally:
+            GRIB_LOCK.release()
 
         set_status(product, fxx, "ready")
         log.info(f"[prefetch] {product} F{fxx:02d} ready")
