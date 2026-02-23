@@ -21,11 +21,7 @@ import time
 import logging
 from datetime import timezone
 
-# Global lock shared across all products.
-# Only one GRIB download/process runs at a time to stay within memory budget.
-# Import this in any module that downloads HRRR data:
-#   from prefetch import GRIB_LOCK
-GRIB_LOCK = threading.Lock()
+from grib_lock import GRIB_LOCK
 
 log = logging.getLogger("prefetch")
 
