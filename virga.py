@@ -31,13 +31,18 @@ LEVELS_MB  = [500, 525, 550, 575, 600, 625, 650, 675,
               700, 725, 750, 775, 800, 825, 850]
 LEVELS_SET = frozenset(LEVELS_MB)
 
-# Herbie searchString — no capture groups to avoid pandas warning.
-# Matches lines containing any of our target level strings + variable abbrevs.
-# Written as a simple alternation without outer grouping.
-SEARCH_STRING = "TMP|DPT|UGRD|VGRD"   # filter to just these 4 variable types
+# Herbie searchString — matches our 4 variables at our 15 specific levels only.
+# Written without capture groups to avoid pandas UserWarning.
+# IDX lines look like: "TMP:500 mb:1 hour fcst"
+_LEVEL_LIST   = "500 mb|525 mb|550 mb|575 mb|600 mb|625 mb|650 mb|675 mb|700 mb|725 mb|750 mb|775 mb|800 mb|825 mb|850 mb"
+SEARCH_STRING = f"TMP:{_LEVEL_LIST}|DPT:{_LEVEL_LIST}|UGRD:{_LEVEL_LIST}|VGRD:{_LEVEL_LIST}"
 
 _CACHE    = {}
 _CLIP_IDX = {}   # cache (r0,r1,c0,c1,step) by grid shape
+
+# Prevent concurrent GRIB downloads from competing for memory
+import threading
+_DOWNLOAD_LOCK = threading.Lock()
 
 
 # ── Herbie helpers ────────────────────────────────────────────────────────────
@@ -175,8 +180,9 @@ def fetch_virga(cycle_utc: str, fxx: int = 1) -> dict:
     ).replace(tzinfo=None)
     cycle_aware = cycle.replace(tzinfo=timezone.utc)
 
-    subset_path = _download_subset(cycle, fxx)
-    lat_co, lon_co, T_co, Td_co, U_co, V_co = _read_subset_clipped(subset_path)
+    with _DOWNLOAD_LOCK:
+        subset_path = _download_subset(cycle, fxx)
+        lat_co, lon_co, T_co, Td_co, U_co, V_co = _read_subset_clipped(subset_path)
     shape = lat_co.shape
 
     rh_co = {lev: _rh(T_co[lev], Td_co[lev]) for lev in LEVELS_MB}
