@@ -84,7 +84,10 @@ def _fetch_one(product, cycle_utc, fxx):
         if any(k in msg for k in ["not found", "did not find", "no such file", "404",
                                    "nomads", "full file", "byte-range"]):
             set_status(product, fxx, "unavailable")
-            log.info(f"[prefetch] {product} F{fxx:02d} unavailable (NOMADS or not on AWS yet)")
+            log.debug(f"[prefetch] {product} F{fxx:02d} unavailable (NOMADS or not on AWS yet)")
+        elif "grib_lock timeout" in msg or "lock timeout" in msg:
+            set_status(product, fxx, "pending")
+            log.debug(f"[prefetch] {product} F{fxx:02d} lock timeout, will retry")
         else:
             set_status(product, fxx, "error")
             log.warning(f"[prefetch] {product} F{fxx:02d} error: {e}")
