@@ -51,16 +51,26 @@ def _now_utc_hour_naive():
     return datetime.utcnow().replace(minute=0, second=0, microsecond=0)
 
 
+_MAX_SUBSET_MB = 50
+
 def _download_subset(cycle, fxx):
-    """Download only TMP/DPT/UGRD/VGRD messages from the prs file."""
+    """
+    Download only TMP/DPT/UGRD/VGRD messages from the prs file.
+    Raises RuntimeError if file exceeds _MAX_SUBSET_MB — means NOMADS
+    returned the full file (no byte-range support).
+    """
     H = Herbie(cycle, model="hrrr", product="prs", fxx=fxx,
                save_dir=str(HERBIE_DIR), overwrite=False)
     result = H.download(searchString=SEARCH_STRING)
     p = Path(result) if result else None
     if p is None or not p.exists():
-        p = Path(H.download())   # rare fallback
-    if not p.exists():
         raise FileNotFoundError(f"Download failed for prs {cycle} F{fxx:02d}")
+    size_mb = p.stat().st_size / 1_000_000
+    if size_mb > _MAX_SUBSET_MB:
+        raise RuntimeError(
+            f"Downloaded file is {size_mb:.0f} MB — NOMADS returned full file "
+            f"(no byte-range support). Try again when data moves to AWS (~1-2 hrs)."
+        )
     return p
 
 
