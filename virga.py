@@ -33,8 +33,9 @@ LEVELS_SET = frozenset(LEVELS_MB)
 # Herbie searchString — matches our 4 variables at our 15 specific levels only.
 # Written without capture groups to avoid pandas UserWarning.
 # IDX lines look like: "TMP:500 mb:1 hour fcst"
-_LEVEL_LIST   = "500 mb|550 mb|600 mb|650 mb|700 mb|750 mb|800 mb|850 mb"
-SEARCH_STRING = f"TMP:{_LEVEL_LIST}|DPT:{_LEVEL_LIST}|UGRD:{_LEVEL_LIST}|VGRD:{_LEVEL_LIST}"
+# Non-capturing groups avoid pandas UserWarning and correctly scope the alternation.
+# Without (?:...) the | operator would match ANY line containing "550 mb" etc.
+SEARCH_STRING = r"(?:TMP|DPT|UGRD|VGRD):(?:500|550|600|650|700|750|800|850) mb"
 
 _CACHE    = {}
 _CLIP_IDX = {}   # cache (r0,r1,c0,c1,step) by grid shape
