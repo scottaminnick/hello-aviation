@@ -79,7 +79,7 @@ def _find_latest_hrrr_cycle(max_lookback_hours=6):
 #   UGRD + VGRD at 700 mb  (wind for U_perp)
 #   TMP  at 850 mb + 500 mb (temperature for Brunt-Väisälä)
 #   HGT  at 850 mb + 500 mb (geopotential height for Δz)
-PRS_SEARCH = r"(UGRD|VGRD).*700 mb|(TMP|HGT).*(850|500) mb"
+PRS_SEARCH = r"(?:UGRD|VGRD):700 mb|(?:TMP|HGT):(?:850|500) mb"
 
 # SFC field needed: orography (model terrain height MSL)
 SFC_SEARCH = r"OROG"
