@@ -6,6 +6,7 @@ from metar import get_metars_cached, summarize_metars
 from rap_point import get_rap_point_guidance_cached
 from winds import get_hrrr_gusts_cached, get_cycle_status_cached
 from froude import get_froude_cached
+from icing  import get_icing_cached
 from virga import get_virga_cached
 from prefetch import start_prefetch_thread, get_all_status
 
@@ -252,6 +253,7 @@ HRRR_MAP_TEMPLATE = """<!doctype html>
       <option value="winds">Wind Gusts</option>
       <option value="froude">Froude Number</option>
       <option value="virga">Virga Potential</option>
+      <option value="icing">Icing Threat</option>
     </select>
   </div>
 
@@ -411,6 +413,56 @@ const PRODUCTS = {
     &ge;80% &mdash; Extreme <span class="leg-sub">full evap likely</span>
   </div>`
   }
+,
+  icing: {
+    label:    'Icing Threat',
+    endpoint: '/api/icing/colorado',
+    loadMsg:  'Fetching HRRR prs…<br><small style="color:var(--muted)">RH + omega + convergence</small>',
+    color:    function(p) {
+      if (p.cat >= 3) return '#e74c3c';   // red    – high
+      if (p.cat >= 2) return '#e67e22';   // orange – moderate
+      if (p.cat >= 1) return '#f1c40f';   // yellow – low
+      return '#2c3e50';                   // grey   – negligible
+    },
+    popup: function(p) {
+      var upslope = '';
+      if (p.wdir850 >= 45 && p.wdir850 <= 135 && p.spd850 >= 10)
+        upslope = '<br><b style="color:#58a6ff">\u25b2 Front Range upslope</b>';
+      if (p.wdir850 >= 225 && p.wdir850 <= 315 && p.spd850 >= 10)
+        upslope = '<br><b style="color:#58a6ff">\u25b2 West slope upslope</b>';
+      return '<b>Icing score: ' + p.score.toFixed(2) + '</b>' +
+             ' (cat ' + p.cat + ')<br>' +
+             'RH 850/700: ' + p.rh850.toFixed(0) + '% / ' + p.rh700.toFixed(0) + '%<br>' +
+             'Sat: '    + p.sat.toFixed(2)    +
+             '  Asc: '  + p.ascent.toFixed(2) +
+             '  Conv: ' + p.conv.toFixed(2)   + '<br>' +
+             '850mb wind: ' + p.spd850.toFixed(0) + ' kt @ ' + p.wdir850.toFixed(0) + '\u00b0' +
+             upslope + '<br>' +
+             p.lat.toFixed(3) + '\u00b0N, ' + Math.abs(p.lon).toFixed(3) + '\u00b0W';
+    },
+    legend: `<div class="leg-title">Winter Icing Threat Index</div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#2c3e50"></div>
+    Negligible <span class="leg-sub">score &lt;0.35</span>
+  </div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#f1c40f"></div>
+    Low <span class="leg-sub">0.35–0.55</span>
+  </div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#e67e22"></div>
+    Moderate <span class="leg-sub">0.55–0.75</span>
+  </div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#e74c3c"></div>
+    High <span class="leg-sub">&ge;0.75</span>
+  </div>
+  <div style="margin-top:0.6rem;font-size:0.63rem;color:var(--muted);">
+    Sat(0.45) · Ascent(0.35) · Conv(0.20)<br>
+    +0.15 Front Range upslope · +0.10 West slope
+  </div>`
+  }
+
 };
 
 // ── state ─────────────────────────────────────────────────────────────────────
@@ -850,6 +902,34 @@ def api_froude_colorado():
 
     try:
         data = get_froude_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=ttl)
+        return jsonify(data)
+    except Exception as e:
+        msg = str(e)
+        not_ready = any(k in msg.lower() for k in [
+            "did not find", "not found", "no such file", "404", "unavailable",
+            "nomads", "full file", "byte-range", "grib_lock timeout"
+        ])
+        if not_ready:
+            return jsonify({
+                "error": "not_available",
+                "message": f"F{fxx:02d} for cycle {cycle_utc} is not yet available.",
+                "fxx": fxx, "cycle_utc": cycle_utc,
+            }), 404
+        raise
+
+
+@app.get("/api/icing/colorado")
+def api_icing_colorado():
+    fxx       = int(request.args.get("fxx", 1))
+    cycle_utc = request.args.get("cycle_utc")
+    ttl       = int(request.args.get("ttl", os.environ.get("ICING_TTL", "600")))
+
+    if not cycle_utc:
+        status    = get_cycle_status_cached(ttl_seconds=300)
+        cycle_utc = status["cycles"][0]["cycle_utc"]
+
+    try:
+        data = get_icing_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=ttl)
         return jsonify(data)
     except Exception as e:
         msg = str(e)
