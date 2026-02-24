@@ -207,6 +207,33 @@ HRRR_MAP_TEMPLATE = """<!doctype html>
   #load-msg { font-size: 0.8rem; color: var(--muted); text-align: center;
               max-width: 240px; }
 
+    .apt-label {
+      background: none !important; border: none !important; box-shadow: none !important;
+      font-size: 0.65rem; font-weight: 700;
+      color: #58a6ff; text-shadow: 0 0 3px #0d1117, 0 0 3px #0d1117;
+      padding: 0 !important;
+    }
+    .city-label {
+      background: none !important; border: none !important; box-shadow: none !important;
+      font-size: 0.62rem; color: #8b949e;
+      text-shadow: 0 0 3px #0d1117, 0 0 3px #0d1117;
+      padding: 0 !important;
+    }
+    .city-label-major {
+      background: none !important; border: none !important; box-shadow: none !important;
+      font-size: 0.72rem; font-weight: 600; color: #e6edf3;
+      text-shadow: 0 0 4px #0d1117, 0 0 4px #0d1117;
+      padding: 0 !important;
+    }
+    .leaflet-control-layers {
+      background: var(--panel) !important;
+      border: 1px solid var(--border) !important;
+      color: var(--text) !important;
+      font-size: 0.78rem;
+    }
+    .leaflet-control-layers label { color: var(--text) !important; }
+    .leaflet-control-layers-overlays { padding: 0.2rem 0.4rem; }
+
   #error-bar {
     display: none; background: #5a1a1a; color: #f9a8a8;
     padding: 0.4rem 0.75rem; font-size: 0.78rem;
@@ -405,6 +432,161 @@ L.tileLayer(
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}',
   { attribution: 'Tiles &copy; Esri', maxZoom: 13 }
 ).addTo(map);
+
+// ── Reference layers ─────────────────────────────────────────────────────────
+
+// ESRI Roads/Labels reference overlay (sits on top of shaded relief)
+var roadsLayer = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
+  { attribution: '', maxZoom: 13, opacity: 0.55 }
+);
+
+// ── Colorado public-use airports ─────────────────────────────────────────────
+// [ICAO, name, lat, lon, type]  type: "com" = commercial/scheduled, "ga" = general aviation
+var CO_AIRPORTS = [
+  ["KDEN", "Denver Intl",               39.8561, -104.6737, "com"],
+  ["KCOS", "Colorado Springs",          38.8059, -104.7008, "com"],
+  ["KGJT", "Grand Junction Regional",   39.1224, -108.5268, "com"],
+  ["KDRO", "Durango La Plata Co",       37.1515, -107.7538, "com"],
+  ["KPUB", "Pueblo Memorial",           38.2891, -104.4966, "com"],
+  ["KASE", "Aspen/Pitkin County",       39.2232, -106.8687, "com"],
+  ["KEGE", "Eagle County Regional",     39.6426, -106.9177, "com"],
+  ["KHDN", "Yampa Valley (Steamboat)",  40.4812, -107.2218, "com"],
+  ["KGUC", "Gunnison-Crested Butte",    38.5339, -106.9330, "com"],
+  ["KMTJ", "Montrose Regional",         38.5098, -107.8938, "com"],
+  ["KALS", "San Luis Valley Regional",  37.4349, -105.8666, "com"],
+  ["KTEX", "Telluride Regional",        37.9538, -107.9088, "com"],
+  ["KFNL", "Northern CO Regional",      40.4518, -105.0110, "com"],
+  ["KAPA", "Centennial",                39.5701, -104.8490, "ga"],
+  ["KBJC", "Rocky Mtn Metro",           39.9088, -105.1172, "ga"],
+  ["KBDU", "Boulder Municipal",         40.0394, -105.2257, "ga"],
+  ["KGXY", "Greeley-Weld County",       40.4375, -104.6336, "ga"],
+  ["KLMO", "Vance Brand (Longmont)",    40.1712, -105.1628, "ga"],
+  ["KFCS", "Meadow Lake (Fountain)",    38.6784, -104.5698, "ga"],
+  ["KAFF", "USAF Academy",              38.9697, -104.8130, "ga"],
+  ["KBKF", "Buckley SFB (Aurora)",      39.7017, -104.7517, "ga"],
+  ["KANK", "Harriet Alexander (Salida)",38.5398, -105.9952, "ga"],
+  ["KAEJ", "Central CO Regional",       38.8440, -106.1188, "ga"],
+  ["KLXV", "Lake County (Leadville)",   39.2238, -106.3177, "ga"],
+  ["KRIL", "Garfield Co (Rifle)",       39.5263, -107.7266, "ga"],
+  ["KCAG", "Craig-Moffat County",       40.4952, -107.5225, "ga"],
+  ["KCNM", "Cortez Municipal",          37.3030, -108.6278, "ga"],
+  ["KCFO", "Canon City",                38.4458, -105.1122, "ga"],
+  ["KTAD", "Perry Stokes (Trinidad)",   37.2594, -104.3412, "ga"],
+  ["KLIC", "Limon Municipal",           39.2748, -103.6659, "ga"],
+  ["KLAA", "Lamar Municipal",           38.0697, -102.6886, "ga"],
+  ["KLHX", "La Junta Municipal",        38.0497, -103.5094, "ga"],
+  ["KSPD", "Springdale/SE CO",          37.3388, -102.6124, "ga"],
+  ["KSBS", "Steamboat Springs",         40.5163, -106.8660, "ga"],
+];
+
+function buildAirportLayer() {
+  var markers = [];
+  CO_AIRPORTS.forEach(function(a) {
+    var icao = a[0], name = a[1], lat = a[2], lon = a[3], type = a[4];
+    var isCom = (type === "com");
+    var m = L.circleMarker([lat, lon], {
+      radius:      isCom ? 7 : 5,
+      color:       isCom ? "#58a6ff" : "#8b949e",
+      fillColor:   isCom ? "#1f6feb" : "#30363d",
+      fillOpacity: 0.85,
+      weight:      1.5
+    });
+    m.bindPopup(
+      "<b>" + icao + "</b><br>" + name + "<br>" +
+      "<span style=\"color:#8b949e;font-size:0.8em\">" +
+      lat.toFixed(3) + "\u00b0N  " + Math.abs(lon).toFixed(3) + "\u00b0W</span>",
+      { maxWidth: 180 }
+    );
+    markers.push(m);
+  });
+
+  var layer = L.layerGroup(markers);
+
+  // Show/hide ICAO text labels based on zoom
+  map.on("zoomend", function() {
+    if (!map.hasLayer(layer)) return;
+    var z = map.getZoom();
+    markers.forEach(function(m) {
+      if (z >= 8) {
+        if (!m.getTooltip()) {
+          var icao = m.getPopup().getContent().match(/<b>(.*?)<\/b>/)[1];
+          m.bindTooltip(icao, {
+            permanent: true, direction: "right",
+            className: "apt-label", offset: [6, 0]
+          }).openTooltip();
+        }
+      } else {
+        if (m.getTooltip()) m.unbindTooltip();
+      }
+    });
+  });
+
+  return layer;
+}
+
+// ── Major Colorado cities ─────────────────────────────────────────────────────
+var CO_CITIES = [
+  ["Denver",          39.7392, -104.9903, true ],
+  ["Colorado Springs",38.8339, -104.8214, true ],
+  ["Grand Junction",  39.0639, -108.5506, true ],
+  ["Pueblo",          38.2544, -104.6091, false],
+  ["Fort Collins",    40.5853, -105.0844, false],
+  ["Boulder",         40.0150, -105.2705, false],
+  ["Greeley",         40.4233, -104.7091, false],
+  ["Longmont",        40.1672, -105.1019, false],
+  ["Loveland",        40.3978, -105.0747, false],
+  ["Aurora",          39.7294, -104.8319, false],
+  ["Lakewood",        39.7047, -105.0814, false],
+  ["Arvada",          39.8028, -105.0875, false],
+  ["Steamboat Springs",40.4850,-106.8317, false],
+  ["Glenwood Springs",39.5505, -107.3248, false],
+  ["Aspen",           39.1911, -106.8175, false],
+  ["Telluride",       37.9375, -107.8123, false],
+  ["Montrose",        38.4783, -107.8762, false],
+  ["Alamosa",         37.4695, -105.8700, false],
+  ["Trinidad",        37.1694, -104.5003, false],
+  ["Lamar",           38.0872, -102.6207, false],
+  ["Craig",           40.5153, -107.5464, false],
+  ["Salida",          38.5347, -106.0000, false],
+  ["Leadville",       39.2503, -106.2925, false],
+  ["Durango",         37.2753, -107.8801, false],
+];
+
+function buildCityLayer() {
+  var markers = [];
+  CO_CITIES.forEach(function(c) {
+    var name = c[0], lat = c[1], lon = c[2], major = c[3];
+    var m = L.circleMarker([lat, lon], {
+      radius:      major ? 5 : 3,
+      color:       "#e6edf3",
+      fillColor:   "#e6edf3",
+      fillOpacity: major ? 0.9 : 0.6,
+      weight:      1
+    });
+    m.bindTooltip(name, {
+      permanent: true, direction: "right",
+      className: major ? "city-label-major" : "city-label",
+      offset:    [5, 0]
+    });
+    markers.push(m);
+  });
+  return L.layerGroup(markers);
+}
+
+// Build layers (not added to map yet — user toggles via layer control)
+var airportLayer = buildAirportLayer();
+var cityLayer    = buildCityLayer();
+
+// ── Leaflet layer control ─────────────────────────────────────────────────────
+var overlayMaps = {
+  "\u2708 Airports": airportLayer,
+  "\u25cf Cities":   cityLayer,
+  "\u2261 Roads":    roadsLayer
+};
+L.control.layers(null, overlayMaps, { collapsed: false, position: "topright" })
+  .addTo(map);
+
 
 // ── product switching ─────────────────────────────────────────────────────────
 function onProductChange() {
