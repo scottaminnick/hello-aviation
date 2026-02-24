@@ -107,7 +107,7 @@ def _rh(T_K, Td_K):
 
 
 def _virga_category(pct):
-    cat = np.zeros_like(pct, dtype=int)
+    cat = np.zeros_like(pct, dtype=int)   # 0 = negligible (<20%)
     cat[pct >= 20] = 1
     cat[pct >= 40] = 2
     cat[pct >= 60] = 3
@@ -243,8 +243,6 @@ def fetch_virga(cycle_utc: str, fxx: int = 1) -> dict:
     for i in range(ny):
         for j in range(nx):
             vpct = float(virga_pct[i, j])
-            if vpct < 20.0:
-                continue
             points.append({
                 "lat":        round(float(lat_co[i, j]), 4),
                 "lon":        round(float(lon_co[i, j]), 4),
