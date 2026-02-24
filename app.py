@@ -471,17 +471,25 @@ const PRODUCTS = {
     endpoint:   '/api/winds/surface',
     loadMsg:    'Fetching HRRR 10m wind…<br><small style="color:var(--muted)">~15 s</small>',
     renderMode: 'streamline',
-    popup:      null,
-    color:      null,
-    legend: `<div class="leg-title">10m Wind (Streamlines)</div>
-  <div class="leg-row"><div class="leg-swatch" style="background:#3498db"></div>&lt; 8 kt — light</div>
-  <div class="leg-row"><div class="leg-swatch" style="background:#58d68d"></div>8–15 kt</div>
+    color: function(p) {
+      if (p.cat >= 4) return '#e74c3c';   // red    ≥40 kt
+      if (p.cat >= 3) return '#e67e22';   // orange 25-40 kt
+      if (p.cat >= 2) return '#f1c40f';   // yellow 15-25 kt
+      if (p.cat >= 1) return '#3d8f6e';   // teal   8-15 kt
+      return '#1a3a5c';                   // dark blue <8 kt (nearly transparent feel)
+    },
+    popup: function(p) {
+      return '<b>' + p.spd.toFixed(0) + ' kt</b> from ' + p.wdir.toFixed(0) + '\u00b0<br>' +
+             p.lat.toFixed(3) + '\u00b0N, ' + Math.abs(p.lon).toFixed(3) + '\u00b0W';
+    },
+    legend: `<div class="leg-title">10m Wind Speed</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#1a3a5c"></div>&lt; 8 kt</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#3d8f6e"></div>8–15 kt</div>
   <div class="leg-row"><div class="leg-swatch" style="background:#f1c40f"></div>15–25 kt</div>
   <div class="leg-row"><div class="leg-swatch" style="background:#e67e22"></div>25–40 kt</div>
-  <div class="leg-row"><div class="leg-swatch" style="background:#e74c3c"></div>&ge; 40 kt — strong</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#e74c3c"></div>&ge; 40 kt</div>
   <div style="margin-top:0.6rem;font-size:0.63rem;color:var(--muted);">
-    Particle trails show flow direction.<br>
-    Brighter = faster.  Toggle opacity has no effect on streamlines.
+    White streamlines show flow direction &amp; speed.<br>Click any cell for wind details.
   </div>`
   }
 
@@ -828,11 +836,30 @@ async function loadData() {
 }
 
 function renderLayer(data, prod) {
-  // Streamline mode: canvas animation, not Leaflet rectangles
+  // Streamline mode: colour-fill background tiles first, then canvas animation
   if (prod.renderMode === 'streamline') {
-    _slStop();   // clear any previous animation
+    _slStop();
+
+    // Render speed colour tiles as normal Leaflet rects (reuse rect renderer)
+    var half    = (data.cell_size_deg || 0.05) / 2;
+    var halfLon = (data.cell_size_deg || 0.05) * 1.25;
+    var renderer = L.canvas();
+    var rects = [];
+    (data.points || []).forEach(function(p) {
+      var color = prod.color(p);
+      var rect = L.rectangle(
+        [[p.lat - half, p.lon - halfLon], [p.lat + half, p.lon + halfLon]],
+        { renderer: renderer, color: color, fillColor: color,
+          fillOpacity: 0.72, weight: 0 }
+      );
+      rect.bindPopup(prod.popup(p), { maxWidth: 180 });
+      rects.push(rect);
+    });
+    dataLayer = L.layerGroup(rects).addTo(map);
+    dataLayer._isStreamline = true;   // so clear logic also calls _slStop
+
+    // Start particle animation on top
     _slStartAnimation(data);
-    dataLayer = { _isStreamline: true };   // sentinel so loadData can clear it
     return;
   }
   var half    = (data.cell_size_deg || 0.045) / 2;
@@ -965,9 +992,9 @@ function _slAnimate() {
   var d   = _sl.data;
   if (!ctx || !d) return;
 
-  // Trail fade: semi-transparent black wipe
+  // Trail fade — wipe is transparent so background tiles show through
   ctx.globalCompositeOperation = 'source-over';
-  ctx.fillStyle = 'rgba(13,17,23,0.18)';
+  ctx.fillStyle = 'rgba(13,17,23,0.28)';   // slightly faster fade than before
   ctx.fillRect(0, 0, _sl.canvas.width, _sl.canvas.height);
 
   // Zoom-aware speed scaling — particles move faster when zoomed in
@@ -996,12 +1023,14 @@ function _slAnimate() {
     var pt0 = map.latLngToContainerPoint([p.lat,       p.lon]);
     var pt1 = map.latLngToContainerPoint([p.lat+dlat,  p.lon+dlon]);
 
-    // Draw line segment
-    ctx.globalCompositeOperation = 'lighter';
+    // Draw white particle trail
+    ctx.globalCompositeOperation = 'source-over';
     ctx.beginPath();
-    ctx.strokeStyle = _slColor(spd);
-    ctx.lineWidth   = 1.2;
-    ctx.globalAlpha = 0.75;
+    // Opacity ramps up with speed so calm areas stay subtle
+    var alpha = Math.min(0.3 + (spd / 20) * 0.65, 0.92);
+    ctx.strokeStyle = 'rgba(255,255,255,' + alpha.toFixed(2) + ')';
+    ctx.lineWidth   = 1.4;
+    ctx.globalAlpha = 1.0;
     ctx.moveTo(pt0.x, pt0.y);
     ctx.lineTo(pt1.x, pt1.y);
     ctx.stroke();
