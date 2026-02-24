@@ -6,7 +6,8 @@ from metar import get_metars_cached, summarize_metars
 from rap_point import get_rap_point_guidance_cached
 from winds import get_hrrr_gusts_cached, get_cycle_status_cached
 from froude import get_froude_cached
-from icing  import get_icing_cached
+from icing         import get_icing_cached
+from winds_surface import get_surface_wind_cached
 from virga import get_virga_cached
 from prefetch import start_prefetch_thread, get_all_status
 
@@ -254,6 +255,7 @@ HRRR_MAP_TEMPLATE = """<!doctype html>
       <option value="froude">Froude Number</option>
       <option value="virga">Virga Potential</option>
       <option value="icing">Icing Threat</option>
+      <option value="surface_wind">Surface Flow</option>
     </select>
   </div>
 
@@ -460,6 +462,26 @@ const PRODUCTS = {
   <div style="margin-top:0.6rem;font-size:0.63rem;color:var(--muted);">
     Sat(0.45) · Ascent(0.35) · Conv(0.20)<br>
     +0.15 Front Range upslope · +0.10 West slope
+  </div>`
+  }
+,
+
+  surface_wind: {
+    label:      'Surface Flow',
+    endpoint:   '/api/winds/surface',
+    loadMsg:    'Fetching HRRR 10m wind…<br><small style="color:var(--muted)">~15 s</small>',
+    renderMode: 'streamline',
+    popup:      null,
+    color:      null,
+    legend: `<div class="leg-title">10m Wind (Streamlines)</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#3498db"></div>&lt; 8 kt — light</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#58d68d"></div>8–15 kt</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#f1c40f"></div>15–25 kt</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#e67e22"></div>25–40 kt</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#e74c3c"></div>&ge; 40 kt — strong</div>
+  <div style="margin-top:0.6rem;font-size:0.63rem;color:var(--muted);">
+    Particle trails show flow direction.<br>
+    Brighter = faster.  Toggle opacity has no effect on streamlines.
   </div>`
   }
 
@@ -771,7 +793,11 @@ async function loadData() {
   document.getElementById('error-bar').style.display = 'none';
 
   // clear previous layer
-  if (dataLayer) { map.removeLayer(dataLayer); dataLayer = null; }
+  if (dataLayer) {
+    if (dataLayer._isStreamline) { _slStop(); }
+    else { map.removeLayer(dataLayer); }
+    dataLayer = null;
+  }
 
   try {
     var url = prod.endpoint +
@@ -802,6 +828,13 @@ async function loadData() {
 }
 
 function renderLayer(data, prod) {
+  // Streamline mode: canvas animation, not Leaflet rectangles
+  if (prod.renderMode === 'streamline') {
+    _slStop();   // clear any previous animation
+    _slStartAnimation(data);
+    dataLayer = { _isStreamline: true };   // sentinel so loadData can clear it
+    return;
+  }
   var half    = (data.cell_size_deg || 0.045) / 2;
   var halfLon = (data.cell_size_deg || 0.045) * 1.25;
   var renderer = L.canvas();
@@ -839,6 +872,168 @@ fetchStatus().then(function() {
 
 // refresh status every 5 min
 statusTimer = setInterval(fetchStatus, 300000);
+// ═══════════════════════════════════════════════════════════════════════════════
+// Streamline (particle animation) engine
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var _sl = {
+  canvas:   null,
+  ctx:      null,
+  animId:   null,
+  data:     null,
+  N:        1800,          // particle count (medium density)
+  age_max:  120,           // frames before forced respawn
+  speed_scale: 0.25,       // pixels per frame per m/s at zoom 7 baseline
+  particles: [],
+};
+
+// Speed → colour  (blue → cyan → yellow → orange → red)
+function _slColor(spd_ms) {
+  var kt = spd_ms * 1.94384;
+  if (kt >= 40) return 'rgba(231, 76, 60,  0.85)';   // red
+  if (kt >= 25) return 'rgba(230,126, 34,  0.85)';   // orange
+  if (kt >= 15) return 'rgba(241,196, 15,  0.85)';   // yellow
+  if (kt >=  8) return 'rgba( 88,214,141,  0.85)';   // green
+  return             'rgba( 52,152,219,  0.85)';      // blue
+}
+
+// Bilinear interpolation of U or V at fractional grid index (gx, gy)
+function _slInterp(flat, cols, gx, gy) {
+  var x0 = Math.floor(gx), y0 = Math.floor(gy);
+  var x1 = x0 + 1,         y1 = y0 + 1;
+  var rows = flat.length / cols;
+  if (x0 < 0 || y0 < 0 || x1 >= cols || y1 >= rows) return 0;
+  var fx = gx - x0, fy = gy - y0;
+  var q00 = flat[y0 * cols + x0];
+  var q10 = flat[y0 * cols + x1];
+  var q01 = flat[y1 * cols + x0];
+  var q11 = flat[y1 * cols + x1];
+  return (q00*(1-fx)*(1-fy) + q10*fx*(1-fy) +
+          q01*(1-fx)*fy     + q11*fx*fy);
+}
+
+// Convert lat/lon → fractional grid index
+function _slLatLonToGrid(lat, lon, d) {
+  var gx = (lon - d.lon_min) / (d.lon_max - d.lon_min) * (d.cols - 1);
+  var gy = (lat - d.lat_min) / (d.lat_max - d.lat_min) * (d.rows - 1);
+  return [gx, gy];
+}
+
+// Random particle within Colorado bounds
+function _slRandomParticle(d) {
+  return {
+    lat: d.lat_min + Math.random() * (d.lat_max - d.lat_min),
+    lon: d.lon_min + Math.random() * (d.lon_max - d.lon_min),
+    age: Math.floor(Math.random() * 80),
+  };
+}
+
+function _slInitParticles(d) {
+  _sl.particles = [];
+  for (var i = 0; i < _sl.N; i++) {
+    _sl.particles.push(_slRandomParticle(d));
+  }
+}
+
+function _slStartAnimation(data) {
+  _sl.data = data;
+  _slInitParticles(data);
+
+  // Create canvas sized to map container
+  var container = document.getElementById('map');
+  var cvs = document.createElement('canvas');
+  cvs.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:500;';
+  cvs.width  = container.offsetWidth;
+  cvs.height = container.offsetHeight;
+  container.appendChild(cvs);
+  _sl.canvas = cvs;
+  _sl.ctx    = cvs.getContext('2d');
+
+  // Reposition canvas when map is panned (Leaflet fires 'move')
+  map.on('move zoom', _slResetOnMove);
+
+  _slAnimate();
+}
+
+function _slResetOnMove() {
+  // On pan/zoom: reset particles so they respawn in visible area
+  if (_sl.data) _slInitParticles(_sl.data);
+}
+
+function _slAnimate() {
+  var ctx = _sl.ctx;
+  var d   = _sl.data;
+  if (!ctx || !d) return;
+
+  // Trail fade: semi-transparent black wipe
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(13,17,23,0.18)';
+  ctx.fillRect(0, 0, _sl.canvas.width, _sl.canvas.height);
+
+  // Zoom-aware speed scaling — particles move faster when zoomed in
+  var zoomFactor = Math.pow(2, map.getZoom() - 7) * _sl.speed_scale;
+
+  var ps = _sl.particles;
+  for (var i = 0; i < ps.length; i++) {
+    var p = ps[i];
+    p.age++;
+
+    // Grid position for this particle
+    var g = _slLatLonToGrid(p.lat, p.lon, d);
+    var gx = g[0], gy = g[1];
+
+    // Sample wind
+    var u = _slInterp(d.u_flat, d.cols, gx, gy);
+    var v = _slInterp(d.v_flat, d.cols, gx, gy);
+    var spd = Math.sqrt(u*u + v*v);
+
+    // Convert m/s displacement to lat/lon shift
+    // Approx: 1 deg lat ≈ 111 km, 1 deg lon ≈ 111*cos(lat) km
+    var dlat = (v / 111000) * zoomFactor * 40;
+    var dlon = (u / (111000 * Math.cos(p.lat * Math.PI/180))) * zoomFactor * 40;
+
+    // Map new position to canvas pixel
+    var pt0 = map.latLngToContainerPoint([p.lat,       p.lon]);
+    var pt1 = map.latLngToContainerPoint([p.lat+dlat,  p.lon+dlon]);
+
+    // Draw line segment
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.beginPath();
+    ctx.strokeStyle = _slColor(spd);
+    ctx.lineWidth   = 1.2;
+    ctx.globalAlpha = 0.75;
+    ctx.moveTo(pt0.x, pt0.y);
+    ctx.lineTo(pt1.x, pt1.y);
+    ctx.stroke();
+
+    // Advance particle lat/lon
+    p.lat += dlat;
+    p.lon += dlon;
+
+    // Respawn if out of bounds or too old
+    if (p.age > _sl.age_max ||
+        p.lat < d.lat_min || p.lat > d.lat_max ||
+        p.lon < d.lon_min || p.lon > d.lon_max) {
+      ps[i] = _slRandomParticle(d);
+    }
+  }
+
+  ctx.globalAlpha = 1.0;
+  ctx.globalCompositeOperation = 'source-over';
+
+  _sl.animId = requestAnimationFrame(_slAnimate);
+}
+
+function _slStop() {
+  if (_sl.animId) { cancelAnimationFrame(_sl.animId); _sl.animId = null; }
+  map.off('move zoom', _slResetOnMove);
+  if (_sl.canvas && _sl.canvas.parentNode) {
+    _sl.canvas.parentNode.removeChild(_sl.canvas);
+  }
+  _sl.canvas = _sl.ctx = _sl.data = null;
+  _sl.particles = [];
+}
+
 </script>
 </body>
 </html>"""
@@ -942,6 +1137,35 @@ def api_icing_colorado():
                 "error": "not_available",
                 "message": f"F{fxx:02d} for cycle {cycle_utc} is not yet available.",
                 "fxx": fxx, "cycle_utc": cycle_utc,
+            }), 404
+        raise
+
+
+@app.get("/api/winds/surface")
+def api_winds_surface():
+    fxx       = int(request.args.get("fxx", 1))
+    cycle_utc = request.args.get("cycle_utc")
+    ttl       = int(request.args.get("ttl", os.environ.get("WIND_SURF_TTL", "600")))
+
+    if not cycle_utc:
+        status    = get_cycle_status_cached(ttl_seconds=300)
+        cycle_utc = status["cycles"][0]["cycle_utc"]
+
+    try:
+        data = get_surface_wind_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=ttl)
+        return jsonify(data)
+    except Exception as e:
+        msg = str(e)
+        not_ready = any(k in msg.lower() for k in [
+            "did not find", "not found", "no such file", "404", "unavailable",
+            "nomads", "full file", "byte-range", "grib_lock"
+        ])
+        if not_ready:
+            return jsonify({
+                "error":     "not_available",
+                "message":   f"F{fxx:02d} not yet available.",
+                "fxx":       fxx,
+                "cycle_utc": cycle_utc,
             }), 404
         raise
 
