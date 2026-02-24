@@ -115,7 +115,10 @@ def _read_uv10(subset_path: Path):
         if grb.typeOfLevel != "heightAboveGround" or grb.level != 10:
             continue
         name = grb.name
-        if "U component" not in name and "V component" not in name:
+        # Actual HRRR sfc GRIB names: '10 metre U wind component' / '10 metre V wind component'
+        is_u = "10 metre U" in name or name == "U component of wind"
+        is_v = "10 metre V" in name or name == "V component of wind"
+        if not is_u and not is_v:
             continue
 
         data, lat2d, lon2d = grb.data()
@@ -128,7 +131,7 @@ def _read_uv10(subset_path: Path):
             lon_co = lon2d[r0:r1, c0:c1][::step, ::step]
 
         clipped = _clip(data, clip_idx)
-        if "U component" in name:
+        if is_u:
             u10 = clipped
         else:
             v10 = clipped
