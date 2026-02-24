@@ -862,10 +862,10 @@ function renderLayer(data, prod) {
     _slStartAnimation(data);
     return;
   }
-  // Tiles overlap by ~15% to eliminate sub-pixel gaps at all zoom levels
+  // Tiles overlap by ~4% to close sub-pixel gaps without visible bleed
   var cell    = data.cell_size_deg || 0.045;
-  var half    = cell * 0.58;    // lat half-size (>0.5 = overlap northward)
-  var halfLon = cell * 1.40;    // lon half-size (compensates for cos(lat) shrink + overlap)
+  var half    = cell * 0.52;
+  var halfLon = cell * 1.30;
   var renderer = L.canvas();
   var rects    = [];
 
@@ -1000,7 +1000,7 @@ function _slAnimate() {
   var zoomFactor = Math.pow(2, map.getZoom() - 7) * _sl.speed_scale;
 
   ctx.globalCompositeOperation = 'source-over';
-  ctx.lineWidth = 1.6;
+  ctx.lineWidth = 2.8;   // thicker = visible against coloured background
 
   var ps = _sl.particles;
   for (var i = 0; i < ps.length; i++) {
@@ -1018,12 +1018,12 @@ function _slAnimate() {
     // Store position history for trail segments (max 6 steps)
     if (!p.trail) p.trail = [];
     p.trail.push([p.lat, p.lon]);
-    if (p.trail.length > 6) p.trail.shift();
+    if (p.trail.length > 10) p.trail.shift();  // longer tail
 
     // Draw trail: older segments are more transparent
     if (p.trail.length > 1) {
       // Opacity scales with speed so calm air stays subtle
-      var baseAlpha = Math.min(0.18 + (spd / 18) * 0.72, 0.90);
+      var baseAlpha = Math.min(0.40 + (spd / 18) * 0.55, 0.95);  // brighter
       for (var t = 1; t < p.trail.length; t++) {
         var segAlpha = baseAlpha * (t / p.trail.length);
         var ptA = map.latLngToContainerPoint(p.trail[t-1]);
