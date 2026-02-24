@@ -1170,6 +1170,49 @@ def api_winds_surface():
         raise
 
 
+@app.get("/debug/sfc_fields")
+def debug_sfc_fields():
+    """Show actual GRIB field names in the sfc subset to fix search string."""
+    import traceback
+    try:
+        from herbie import Herbie
+        from winds_surface import HERBIE_DIR, _now_utc_hour_naive
+        from datetime import timedelta
+        import pygrib
+
+        base = _now_utc_hour_naive()
+        cycle = None
+        for h in range(8):
+            dt = base - timedelta(hours=h)
+            try:
+                H = Herbie(dt, model="hrrr", product="sfc", fxx=1,
+                           save_dir=str(HERBIE_DIR), overwrite=False)
+                H.inventory()
+                cycle = dt
+                break
+            except Exception:
+                continue
+
+        if cycle is None:
+            return "Could not find a valid HRRR sfc cycle", 500
+
+        # Download full sfc file (small enough for debug)
+        H = Herbie(cycle, model="hrrr", product="sfc", fxx=1,
+                   save_dir=str(HERBIE_DIR), overwrite=False)
+        path = H.download()
+
+        rows = []
+        grbs = pygrib.open(str(path))
+        for grb in grbs:
+            if "wind" in grb.name.lower() or "UGRD" in str(grb) or "VGRD" in str(grb):
+                rows.append(f"{grb.name!r:45s}  typeOfLevel={grb.typeOfLevel!r:25s}  level={grb.level}")
+        grbs.close()
+
+        return "\n".join(rows) or "No wind fields found", 200, {"Content-Type": "text/plain"}
+    except Exception:
+        return traceback.format_exc(), 500, {"Content-Type": "text/plain"}
+
+
 @app.get("/api/cache/status")
 def api_cache_status():
     """Return pre-fetch cache status for all products and forecast hours."""
