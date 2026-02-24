@@ -613,7 +613,7 @@ statusTimer = setInterval(fetchStatus, 300000);
 def map_hrrr():
     return render_template_string(HRRR_MAP_TEMPLATE)
 
-@app.get("/map/hrrr")
+@app.get("/map/winds")
 def map_winds():
     return render_template_string(HRRR_MAP_TEMPLATE)
 
@@ -651,6 +651,34 @@ def api_virga_colorado():
             return jsonify({
                 "error": "not_available",
                 "message": f"F{fxx:02d} for cycle {cycle_utc} is not yet on AWS.",
+                "fxx": fxx, "cycle_utc": cycle_utc,
+            }), 404
+        raise
+
+
+@app.get("/api/froude/colorado")
+def api_froude_colorado():
+    fxx       = int(request.args.get("fxx", 1))
+    cycle_utc = request.args.get("cycle_utc")
+    ttl       = int(request.args.get("ttl", os.environ.get("FROUDE_TTL", "600")))
+
+    if not cycle_utc:
+        status    = get_cycle_status_cached(ttl_seconds=300)
+        cycle_utc = status["cycles"][0]["cycle_utc"]
+
+    try:
+        data = get_froude_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=ttl)
+        return jsonify(data)
+    except Exception as e:
+        msg = str(e)
+        not_ready = any(k in msg.lower() for k in [
+            "did not find", "not found", "no such file", "404", "unavailable",
+            "nomads", "full file", "byte-range", "grib_lock timeout"
+        ])
+        if not_ready:
+            return jsonify({
+                "error": "not_available",
+                "message": f"F{fxx:02d} for cycle {cycle_utc} is not yet available.",
                 "fxx": fxx, "cycle_utc": cycle_utc,
             }), 404
         raise
