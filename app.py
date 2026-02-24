@@ -435,20 +435,26 @@ async function fetchStatus() {
     var resp = await fetch('/api/winds/status');
     if (!resp.ok) return;
     var s = await resp.json();
-    cycleStatus = s;
+
+    // API returns {cycles: [{cycle_utc, available_hours, pct_complete}, ...]}
+    // Convert to dict keyed by cycle_utc for easy lookup
+    cycleStatus = {};
+    (s.cycles || []).forEach(function(c) {
+      cycleStatus[c.cycle_utc] = c;
+    });
 
     // populate cycle dropdown
     var sel = document.getElementById('cycle-sel');
     var prev = sel.value;
     sel.innerHTML = '';
-    Object.keys(s).sort().reverse().forEach(function(c) {
+    Object.keys(cycleStatus).sort().reverse().forEach(function(c) {
       var opt = document.createElement('option');
       opt.value = c;
       var d = new Date(c);
       opt.textContent = d.toUTCString().slice(5,22) + 'Z';
       sel.appendChild(opt);
     });
-    if (prev && s[prev]) sel.value = prev;
+    if (prev && cycleStatus[prev]) sel.value = prev;
     else if (!currentCycle && sel.options.length) {
       sel.value = sel.options[0].value;
       currentCycle = sel.value;
@@ -457,7 +463,7 @@ async function fetchStatus() {
     buildHourButtons();
 
     // progress bar for active cycle
-    var cs = s[currentCycle];
+    var cs = cycleStatus[currentCycle];
     if (cs) {
       document.getElementById('progress-fill').style.width = cs.pct_complete + '%';
       document.getElementById('cycle-pct').textContent = cs.pct_complete + '% ready';
@@ -492,7 +498,7 @@ function buildHourButtons() {
       dot.className = 'dot-badge';
 
       var cached = cache[currentProduct] && cache[currentProduct].includes(f);
-      var loading = cs && cs.loading_hours && cs.loading_hours.includes(f);
+      var loading = false;  // loading_hours not in status API
 
       if (cached)       { dot.classList.add('dot-green'); }
       else if (loading) { dot.classList.add('dot-yellow'); }
