@@ -493,9 +493,9 @@ function buildAirportLayer() {
       weight:      1.5
     });
     m.bindPopup(
-      "<b>" + icao + "</b><br>" + name + "<br>" +
-      "<span style=\"color:#8b949e;font-size:0.8em\">" +
-      lat.toFixed(3) + "\u00b0N  " + Math.abs(lon).toFixed(3) + "\u00b0W</span>",
+      '<b>' + icao + '</b><br>' + name + '<br>' +
+      '<span style="color:#8b949e;font-size:0.8em">' +
+      lat.toFixed(3) + '\u00b0N\u00a0\u00a0' + Math.abs(lon).toFixed(3) + '\u00b0W</span>',
       { maxWidth: 180 }
     );
     markers.push(m);
@@ -510,7 +510,7 @@ function buildAirportLayer() {
     markers.forEach(function(m) {
       if (z >= 8) {
         if (!m.getTooltip()) {
-          var icao = m.getPopup().getContent().match(/<b>(.*?)<\/b>/)[1];
+          var icao = m.getPopup().getContent().replace(/<b>(.*?)<\/b>.*/,'$1');
           m.bindTooltip(icao, {
             permanent: true, direction: "right",
             className: "apt-label", offset: [6, 0]
