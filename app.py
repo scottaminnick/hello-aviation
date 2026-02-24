@@ -241,8 +241,8 @@ WINDS_MAP_TEMPLATE = """
 
 <div id="legend">
   <div class="leg-title">Wind Gust (kt)</div>
-  <div class="leg-row"><div class="leg-swatch" style="background:#2ecc71"></div>Less than 20</div>
-  <div class="leg-row"><div class="leg-swatch" style="background:#f1c40f"></div>20 to 35</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#2c3e50"></div>Negligible (&lt;20%)</div>
+  <div class="leg-row"><div class="leg-swatch" style="background:#f1c40f"></div>Low (20–40%)</div>
   <div class="leg-row"><div class="leg-swatch" style="background:#e67e22"></div>35 to 50</div>
   <div class="leg-row"><div class="leg-swatch" style="background:#e74c3c"></div>50 and above</div>
 </div>
@@ -1033,10 +1033,11 @@ VIRGA_MAP_TEMPLATE = """
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 function virgaColor(cat) {
-  if (cat === 4) return '#8e44ad';   // extreme - purple
-  if (cat === 3) return '#e74c3c';   // high - red
-  if (cat === 2) return '#e67e22';   // moderate - orange
-  return '#f1c40f';                  // low - yellow
+  if (cat === 4) return '#8e44ad';   // extreme    - purple
+  if (cat === 3) return '#e74c3c';   // high       - red
+  if (cat === 2) return '#e67e22';   // moderate   - orange
+  if (cat === 1) return '#f1c40f';   // low        - yellow
+  return '#2c3e50';                  // negligible - dark grey
 }
 
 const map = L.map('map', {
