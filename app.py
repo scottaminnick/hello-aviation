@@ -994,50 +994,49 @@ function _slAnimate() {
   var d   = _sl.data;
   if (!ctx || !d) return;
 
-  // Trail fade — wipe is transparent so background tiles show through
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.fillStyle = 'rgba(13,17,23,0.28)';   // slightly faster fade than before
-  ctx.fillRect(0, 0, _sl.canvas.width, _sl.canvas.height);
+  // Clear to fully transparent each frame — lets Leaflet colour tiles show through
+  ctx.clearRect(0, 0, _sl.canvas.width, _sl.canvas.height);
 
-  // Zoom-aware speed scaling — particles move faster when zoomed in
   var zoomFactor = Math.pow(2, map.getZoom() - 7) * _sl.speed_scale;
+
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.lineWidth = 1.6;
 
   var ps = _sl.particles;
   for (var i = 0; i < ps.length; i++) {
     var p = ps[i];
     p.age++;
 
-    // Grid position for this particle
-    var g = _slLatLonToGrid(p.lat, p.lon, d);
-    var gx = g[0], gy = g[1];
-
-    // Sample wind
-    var u = _slInterp(d.u_flat, d.cols, gx, gy);
-    var v = _slInterp(d.v_flat, d.cols, gx, gy);
+    var g  = _slLatLonToGrid(p.lat, p.lon, d);
+    var u  = _slInterp(d.u_flat, d.cols, g[0], g[1]);
+    var v  = _slInterp(d.v_flat, d.cols, g[0], g[1]);
     var spd = Math.sqrt(u*u + v*v);
 
-    // Convert m/s displacement to lat/lon shift
-    // Approx: 1 deg lat ≈ 111 km, 1 deg lon ≈ 111*cos(lat) km
     var dlat = (v / 111000) * zoomFactor * 40;
     var dlon = (u / (111000 * Math.cos(p.lat * Math.PI/180))) * zoomFactor * 40;
 
-    // Map new position to canvas pixel
-    var pt0 = map.latLngToContainerPoint([p.lat,       p.lon]);
-    var pt1 = map.latLngToContainerPoint([p.lat+dlat,  p.lon+dlon]);
+    // Store position history for trail segments (max 6 steps)
+    if (!p.trail) p.trail = [];
+    p.trail.push([p.lat, p.lon]);
+    if (p.trail.length > 6) p.trail.shift();
 
-    // Draw white particle trail
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.beginPath();
-    // Opacity ramps up with speed so calm areas stay subtle
-    var alpha = Math.min(0.3 + (spd / 20) * 0.65, 0.92);
-    ctx.strokeStyle = 'rgba(255,255,255,' + alpha.toFixed(2) + ')';
-    ctx.lineWidth   = 1.4;
-    ctx.globalAlpha = 1.0;
-    ctx.moveTo(pt0.x, pt0.y);
-    ctx.lineTo(pt1.x, pt1.y);
-    ctx.stroke();
+    // Draw trail: older segments are more transparent
+    if (p.trail.length > 1) {
+      // Opacity scales with speed so calm air stays subtle
+      var baseAlpha = Math.min(0.18 + (spd / 18) * 0.72, 0.90);
+      for (var t = 1; t < p.trail.length; t++) {
+        var segAlpha = baseAlpha * (t / p.trail.length);
+        var ptA = map.latLngToContainerPoint(p.trail[t-1]);
+        var ptB = map.latLngToContainerPoint(p.trail[t]);
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(255,255,255,' + segAlpha.toFixed(2) + ')';
+        ctx.moveTo(ptA.x, ptA.y);
+        ctx.lineTo(ptB.x, ptB.y);
+        ctx.stroke();
+      }
+    }
 
-    // Advance particle lat/lon
+    // Advance
     p.lat += dlat;
     p.lon += dlon;
 
@@ -1048,9 +1047,6 @@ function _slAnimate() {
       ps[i] = _slRandomParticle(d);
     }
   }
-
-  ctx.globalAlpha = 1.0;
-  ctx.globalCompositeOperation = 'source-over';
 
   _sl.animId = requestAnimationFrame(_slAnimate);
 }
