@@ -862,8 +862,10 @@ function renderLayer(data, prod) {
     _slStartAnimation(data);
     return;
   }
-  var half    = (data.cell_size_deg || 0.045) / 2;
-  var halfLon = (data.cell_size_deg || 0.045) * 1.25;
+  // Tiles overlap by ~15% to eliminate sub-pixel gaps at all zoom levels
+  var cell    = data.cell_size_deg || 0.045;
+  var half    = cell * 0.58;    // lat half-size (>0.5 = overlap northward)
+  var halfLon = cell * 1.40;    // lon half-size (compensates for cos(lat) shrink + overlap)
   var renderer = L.canvas();
   var rects    = [];
 
