@@ -89,6 +89,7 @@ _CLIP_IDX = {}   # cache row/col slice indices by grid shape
 
 # Max acceptable subset size — if larger, NOMADS returned the full file
 _MAX_SUBSET_MB = 50
+_OROG_CACHE = {}   # keyed by cycle date string — orography is static, fetch once from F00
 
 def _download_subset(cycle, product, fxx, searchString):
     """
@@ -286,11 +287,19 @@ def fetch_froude(cycle_utc: str, fxx: int = 1) -> dict:
         raise RuntimeError("GRIB_LOCK timeout — another download is in progress, retry in a moment.")
     try:
         prs_path = _download_subset(cycle, "prs", fxx, PRS_SEARCH)
-        sfc_path = _download_subset(cycle, "sfc", fxx, SFC_SEARCH)
         lat_co, lon_co, U700_co, V700_co, T850_co, T500_co, GH850_co, GH500_co =             _read_prs_subset(prs_path)
         prs_shape_key = next(iter(_CLIP_IDX))
         idx = _CLIP_IDX[prs_shape_key]
-        orog_co = _read_sfc_orography(sfc_path, idx)
+
+        # Orography is static — only in F00, cache by cycle so we fetch it once
+        cycle_date = cycle.strftime("%Y%m%d%H")
+        if cycle_date not in _OROG_CACHE:
+            try:
+                sfc_path = _download_subset(cycle, "sfc", 0, SFC_SEARCH)
+                _OROG_CACHE[cycle_date] = _read_sfc_orography(sfc_path, idx)
+            except Exception:
+                _OROG_CACHE[cycle_date] = None   # will fall back to GH850
+        orog_co = _OROG_CACHE[cycle_date]
     finally:
         GRIB_LOCK.release()
 
