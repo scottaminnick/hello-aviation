@@ -189,9 +189,31 @@ def fetch_surface_wind(cycle_utc: str, fxx: int = 1) -> dict:
     lon_min = float(lon_co.min())
     lon_max = float(lon_co.max())
 
-    # Speed range for legend / colour scaling
-    spd = np.sqrt(u10**2 + v10**2) * 1.94384   # m/s → kt
-    spd_max = float(np.nanpercentile(spd, 99))  # 99th pct avoids spike outliers
+    # Speed, direction, category at each grid point
+    spd  = np.sqrt(u10**2 + v10**2) * 1.94384        # m/s → kt
+    wdir = (np.degrees(np.arctan2(u10, v10)) + 360) % 360   # met convention
+    spd_max = float(np.nanpercentile(spd, 99))
+
+    cat = np.zeros_like(spd, dtype=np.int8)
+    cat[spd >=  8] = 1
+    cat[spd >= 15] = 2
+    cat[spd >= 25] = 3
+    cat[spd >= 40] = 4
+
+    dlat = (lat_max - lat_min) / max(rows - 1, 1)
+    dlon = (lon_max - lon_min) / max(cols - 1, 1)
+    cell_size_deg = round((dlat + dlon) / 2, 4)
+
+    points = []
+    for i in range(rows):
+        for j in range(cols):
+            points.append({
+                "lat":  round(float(lat_co[i, j]), 4),
+                "lon":  round(float(lon_co[i, j]), 4),
+                "spd":  round(float(spd[i, j]),  1),
+                "wdir": round(float(wdir[i, j]), 0),
+                "cat":  int(cat[i, j]),
+            })
 
     valid_dt  = cycle + timedelta(hours=fxx)
     valid_utc = (valid_dt.replace(tzinfo=timezone.utc)
@@ -199,23 +221,21 @@ def fetch_surface_wind(cycle_utc: str, fxx: int = 1) -> dict:
                  .replace("+00:00", "Z"))
 
     return {
-        # Grid metadata
+        "points":        points,
+        "point_count":   rows * cols,
+        "cell_size_deg": cell_size_deg,
         "rows":    rows,
         "cols":    cols,
         "lat_min": round(lat_min, 4),
         "lat_max": round(lat_max, 4),
         "lon_min": round(lon_min, 4),
         "lon_max": round(lon_max, 4),
-        # Wind components — flat row-major (north row first)
-        # rounded to 2 dp — enough precision, reduces JSON size
         "u_flat": [round(float(v), 2) for v in u10.flatten()],
         "v_flat": [round(float(v), 2) for v in v10.flatten()],
-        # Metadata
         "spd_max_kt": round(spd_max, 1),
         "valid_utc":  valid_utc,
         "cycle_utc":  cycle_aware.isoformat(timespec="minutes").replace("+00:00", "Z"),
         "fxx":        fxx,
-        "point_count": rows * cols,
     }
 
 
