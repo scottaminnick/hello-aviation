@@ -1174,7 +1174,7 @@ def api_froude_colorado():
         msg = str(e)
         not_ready = any(k in msg.lower() for k in [
             "did not find", "not found", "no such file", "404", "unavailable",
-            "nomads", "full file", "byte-range", "grib_lock timeout"
+            "nomads", "full file", "byte-range", "grib_lock timeout", "hgt"
         ])
         if not_ready:
             return jsonify({
@@ -1509,6 +1509,7 @@ def api_llti_colorado():
 def handle_exception(e):
     tb = traceback.format_exc()
     return Response(tb, mimetype="text/plain", status=500)
+
 
 
 
