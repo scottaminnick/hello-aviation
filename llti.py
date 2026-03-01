@@ -581,16 +581,21 @@ def fetch_llti_points(cycle_utc: str, fxx: int = 1) -> dict:
     logger.info("LLTI points: cycle=%s  fxx=%d", cycle_utc, fxx)
 
     # ── fetch helper ──────────────────────────────────────────────────────────
-    # overwrite=False  → reuse any file already on disk for this cycle/fxx
-    # remove_grib=False → keep each subset file alive; cfgrib's index cache
-    #                     will break if the file disappears mid-session
-    # IMPORTANT: never call fetch() twice with the same searchstring.
-    # Herbie hashes the searchstring into the subset filename, so a second
-    # call with identical arguments tries to open the same file that cfgrib
-    # may already have indexed, corrupting the index state.
+    # Herbie's subset filename hash is based on byte ranges in the GRIB file,
+    # NOT the searchstring.  Different searchstrings can produce identical
+    # hashes if their fields occupy overlapping byte ranges (e.g. TMP and
+    # OROG in the same sfc file).  The collision means the second fetch tries
+    # to open a file that cfgrib already closed under the first fetch's
+    # context → FileNotFoundError.
+    #
+    # Fix: give every field its own subdirectory so identical hashes in
+    # different fields resolve to different absolute paths.
     def fetch(product: str, search: str) -> xr.Dataset:
+        safe = search.replace(":", "_").replace(" ", "_").strip("_")
+        field_dir = HERBIE_DIR / f"{cycle_dt.strftime('%Y%m%d%H')}_{fxx:02d}" / safe
+        field_dir.mkdir(parents=True, exist_ok=True)
         H = Herbie(cycle_dt, model="hrrr", product=product, fxx=fxx,
-                   save_dir=str(HERBIE_DIR), overwrite=False)
+                   save_dir=str(field_dir), overwrite=False)
         result = H.xarray(search, remove_grib=False)
         if isinstance(result, list):
             result = result[0] if result else xr.Dataset()
