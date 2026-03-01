@@ -10,6 +10,7 @@ from icing         import get_icing_cached
 from winds_surface import get_surface_wind_cached
 from virga import get_virga_cached
 from prefetch import start_prefetch_thread, get_all_status
+from llti import get_llti_cached
 
 app = Flask(__name__)
 
@@ -1426,8 +1427,29 @@ def api_winds_colorado():
             }), 404
         raise
 
+# Two new routes anywhere in the file:
+@app.get("/api/llti/image")
+def api_llti_image():
+    ttl = int(os.environ.get("LLTI_TTL", "600"))
+    try:
+        png_bytes, _ = get_llti_cached(ttl_seconds=ttl)
+        return Response(png_bytes, mimetype="image/png")
+    except Exception:
+        import traceback
+        return Response(traceback.format_exc(), mimetype="text/plain", status=500)
+
+@app.get("/api/llti/meta")
+def api_llti_meta():
+    ttl = int(os.environ.get("LLTI_TTL", "600"))
+    try:
+        _, meta = get_llti_cached(ttl_seconds=ttl)
+        return jsonify(meta)
+    except Exception:
+        import traceback
+        return jsonify({"error": traceback.format_exc()}), 500
 
 @app.errorhandler(Exception)
 def handle_exception(e):
     tb = traceback.format_exc()
     return Response(tb, mimetype="text/plain", status=500)
+
