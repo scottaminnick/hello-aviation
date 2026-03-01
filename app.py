@@ -1502,24 +1502,14 @@ def api_llti_colorado():
         data = get_llti_points_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=ttl)
         return jsonify(data)
     except Exception as e:
-        msg = str(e)
-        not_ready = any(k in msg.lower() for k in [
-            "did not find", "not found", "no such file", "404", "unavailable",
-            "nomads", "full file", "byte-range", "grib_lock timeout"
-        ])
-        if not_ready:
-            return jsonify({
-                "error":     "not_available",
-                "message":   f"F{fxx:02d} for cycle {cycle_utc} is not yet available.",
-                "fxx":       fxx,
-                "cycle_utc": cycle_utc,
-            }), 404
-        raise
+        import traceback
+        return Response(traceback.format_exc(), mimetype="text/plain", status=500)
 
 @app.errorhandler(Exception)
 def handle_exception(e):
     tb = traceback.format_exc()
     return Response(tb, mimetype="text/plain", status=500)
+
 
 
 
