@@ -580,7 +580,14 @@ def fetch_llti_points(cycle_utc: str, fxx: int = 1) -> dict:
 
     logger.info("LLTI points: cycle=%s  fxx=%d", cycle_utc, fxx)
 
-    # ── reuse the same field-fetching logic, but with the requested fxx ───────
+    # ── fetch helper ──────────────────────────────────────────────────────────
+    # overwrite=False  → reuse any file already on disk for this cycle/fxx
+    # remove_grib=False → keep each subset file alive; cfgrib's index cache
+    #                     will break if the file disappears mid-session
+    # IMPORTANT: never call fetch() twice with the same searchstring.
+    # Herbie hashes the searchstring into the subset filename, so a second
+    # call with identical arguments tries to open the same file that cfgrib
+    # may already have indexed, corrupting the index state.
     def fetch(product: str, search: str) -> xr.Dataset:
         H = Herbie(cycle_dt, model="hrrr", product=product, fxx=fxx,
                    save_dir=str(HERBIE_DIR), overwrite=False)
@@ -591,11 +598,19 @@ def fetch_llti_points(cycle_utc: str, fxx: int = 1) -> dict:
             result = result.to_dataset(name=result.name or "var")
         return result
 
-    # Surface fields
-    lat2d_full = np.asarray(
-        fetch("sfc", ":TMP:2 m above ground:")["latitude"].values, dtype=np.float32)
-    lon2d_full = np.asarray(
-        fetch("sfc", ":TMP:2 m above ground:")["longitude"].values, dtype=np.float32)
+    # ── Surface fields — each searchstring called exactly once ───────────────
+    # TMP is fetched first so its lat/lon coordinates can be reused directly.
+    ds_t2m  = fetch("sfc", ":TMP:2 m above ground:")
+    ds_hpbl = fetch("sfc", ":HPBL:surface:")
+    ds_orog = fetch("sfc", ":OROG:surface:")
+    ds_u10  = fetch("sfc", ":UGRD:10 m above ground:")
+    ds_v10  = fetch("sfc", ":VGRD:10 m above ground:")
+    ds_dpt  = fetch("sfc", ":DPT:2 m above ground:")
+    ds_tcc  = fetch("sfc", ":TCDC:entire atmosphere:")
+
+    # lat/lon extracted from the already-fetched TMP dataset — no second fetch
+    lat2d_full = np.asarray(ds_t2m["latitude"].values,  dtype=np.float32)
+    lon2d_full = np.asarray(ds_t2m["longitude"].values, dtype=np.float32)
 
     mask     = _co_mask(lat2d_full, lon2d_full)
     rsl, csl = _bounding_slices(mask)
@@ -605,13 +620,13 @@ def fetch_llti_points(cycle_utc: str, fxx: int = 1) -> dict:
     lat2d = co(lat2d_full)
     lon2d = co(np.where(lon2d_full > 180.0, lon2d_full - 360.0, lon2d_full))
 
-    hpbl_m  = co(_first_var_values(fetch("sfc", ":HPBL:surface:")))
-    orog_m  = co(_first_var_values(fetch("sfc", ":OROG:surface:")))
-    u10m    = co(_first_var_values(fetch("sfc", ":UGRD:10 m above ground:")))
-    v10m    = co(_first_var_values(fetch("sfc", ":VGRD:10 m above ground:")))
-    t2m_k   = co(_first_var_values(fetch("sfc", ":TMP:2 m above ground:")))
-    dpt_k   = co(_first_var_values(fetch("sfc", ":DPT:2 m above ground:")))
-    tcc_pct = co(_first_var_values(fetch("sfc", ":TCDC:entire atmosphere:")))
+    hpbl_m  = co(_first_var_values(ds_hpbl))
+    orog_m  = co(_first_var_values(ds_orog))
+    u10m    = co(_first_var_values(ds_u10))
+    v10m    = co(_first_var_values(ds_v10))
+    t2m_k   = co(_first_var_values(ds_t2m))
+    dpt_k   = co(_first_var_values(ds_dpt))
+    tcc_pct = co(_first_var_values(ds_tcc))
 
     mix_ft = hpbl_m * M_TO_FT
     t_f    = _k_to_f(t2m_k)
