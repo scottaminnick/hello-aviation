@@ -584,7 +584,7 @@ def fetch_llti_points(cycle_utc: str, fxx: int = 1) -> dict:
     def fetch(product: str, search: str) -> xr.Dataset:
         H = Herbie(cycle_dt, model="hrrr", product=product, fxx=fxx,
                    save_dir=str(HERBIE_DIR), overwrite=False)
-        result = H.xarray(search, remove_grib=True)
+        result = H.xarray(search, remove_grib=False)
         if isinstance(result, list):
             result = result[0] if result else xr.Dataset()
         if isinstance(result, xr.DataArray):
