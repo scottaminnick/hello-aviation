@@ -10,7 +10,7 @@ from icing         import get_icing_cached
 from winds_surface import get_surface_wind_cached
 from virga import get_virga_cached
 from prefetch import start_prefetch_thread, get_all_status
-from llti import get_llti_cached, get llti_points_cached
+from llti import get_llti_cached
 
 app = Flask(__name__)
 
@@ -1529,5 +1529,6 @@ def api_llti_colorado():
 def handle_exception(e):
     tb = traceback.format_exc()
     return Response(tb, mimetype="text/plain", status=500)
+
 
 
