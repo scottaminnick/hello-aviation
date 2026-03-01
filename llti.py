@@ -342,8 +342,8 @@ def fetch_llti_grid() -> tuple:
     logger.info("LLTI: fetching HPBL …")
     ds_hpbl = _fetch_field(cycle, "sfc", ":HPBL:surface:")
 
-    logger.info("LLTI: fetching terrain height (OROG) …")
-    ds_orog = _fetch_field(cycle, "sfc", ":OROG:surface:")
+    logger.info("LLTI: fetching terrain height (HGT surface) …")
+    ds_orog = _fetch_field(cycle, "sfc", ":HGT:surface:")
 
     logger.info("LLTI: fetching 10m U wind …")
     ds_u10  = _fetch_field(cycle, "sfc", ":UGRD:10 m above ground:")
@@ -581,21 +581,21 @@ def fetch_llti_points(cycle_utc: str, fxx: int = 1) -> dict:
     logger.info("LLTI points: cycle=%s  fxx=%d", cycle_utc, fxx)
 
     # ── fetch helper ──────────────────────────────────────────────────────────
-    # Herbie's subset filename hash is based on byte ranges in the GRIB file,
-    # NOT the searchstring.  Different searchstrings can produce identical
-    # hashes if their fields occupy overlapping byte ranges (e.g. TMP and
-    # OROG in the same sfc file).  The collision means the second fetch tries
-    # to open a file that cfgrib already closed under the first fetch's
-    # context → FileNotFoundError.
-    #
-    # Fix: give every field its own subdirectory so identical hashes in
-    # different fields resolve to different absolute paths.
+    # Key design decision: use ONE shared save_dir per (cycle, fxx, product).
+    # This means all sfc fields share the same directory, and if two fields
+    # happen to occupy the same byte range (same hash), they legitimately
+    # reuse the same subset file — which is correct behavior.
+    # Using per-field subdirectories causes the opposite problem: Herbie looks
+    # for a file in the field-specific dir, doesn't find it, tries to download,
+    # and cfgrib then can't open it because the session state is inconsistent.
+    _dirs: dict = {}
     def fetch(product: str, search: str) -> xr.Dataset:
-        safe = search.replace(":", "_").replace(" ", "_").strip("_")
-        field_dir = HERBIE_DIR / f"{cycle_dt.strftime('%Y%m%d%H')}_{fxx:02d}" / safe
-        field_dir.mkdir(parents=True, exist_ok=True)
+        if product not in _dirs:
+            d = HERBIE_DIR / f"llti_{cycle_dt.strftime('%Y%m%d%H')}_{fxx:02d}_{product}"
+            d.mkdir(parents=True, exist_ok=True)
+            _dirs[product] = d
         H = Herbie(cycle_dt, model="hrrr", product=product, fxx=fxx,
-                   save_dir=str(field_dir), overwrite=False)
+                   save_dir=str(_dirs[product]), overwrite=False)
         result = H.xarray(search, remove_grib=False)
         if isinstance(result, list):
             result = result[0] if result else xr.Dataset()
@@ -604,10 +604,12 @@ def fetch_llti_points(cycle_utc: str, fxx: int = 1) -> dict:
         return result
 
     # ── Surface fields — each searchstring called exactly once ───────────────
-    # TMP is fetched first so its lat/lon coordinates can be reused directly.
+    # NOTE: terrain height in HRRR sfc is ":HGT:surface:" not ":OROG:surface:"
+    # OROG is not a standard HRRR sfc field; HGT:surface is geopotential height
+    # at the surface = MSL terrain height in metres, which is what we need.
     ds_t2m  = fetch("sfc", ":TMP:2 m above ground:")
     ds_hpbl = fetch("sfc", ":HPBL:surface:")
-    ds_orog = fetch("sfc", ":OROG:surface:")
+    ds_orog = fetch("sfc", ":HGT:surface:")          # terrain height MSL (m)
     ds_u10  = fetch("sfc", ":UGRD:10 m above ground:")
     ds_v10  = fetch("sfc", ":VGRD:10 m above ground:")
     ds_dpt  = fetch("sfc", ":DPT:2 m above ground:")
