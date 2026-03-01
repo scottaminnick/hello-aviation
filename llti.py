@@ -521,7 +521,7 @@ def render_llti_png(
     return buf.read()
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Cached public entry point
+#  Cached public entry point  (PNG + home-page metadata)
 # ─────────────────────────────────────────────────────────────────────────────
 def get_llti_cached(ttl_seconds: int = 600) -> tuple:
     """
@@ -536,3 +536,147 @@ def get_llti_cached(ttl_seconds: int = 600) -> tuple:
         _CACHE["meta"] = meta
         _CACHE["ts"]   = now
     return _CACHE["png"], _CACHE["meta"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Point-data output  (used by the interactive Leaflet map)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Separate cache keyed by (cycle_utc, fxx) so each hour is cached independently
+_POINTS_CACHE: dict = {}
+
+# Grid stride: HRRR ~3 km → every 2nd point ≈ 6 km, ~25k points over Colorado
+_STRIDE = 2
+
+
+def _cat_from_llti(score: float) -> int:
+    """Map LLTI 0-100 score to 4-level risk category."""
+    if score >= 75: return 3   # high
+    if score >= 50: return 2   # moderate
+    if score >= 25: return 1   # low
+    return 0                   # negligible
+
+
+def fetch_llti_points(cycle_utc: str, fxx: int = 1) -> dict:
+    """
+    Fetch HRRR fields for the requested cycle + forecast hour and return
+    LLTI as a JSON-serialisable point list, matching the format used by
+    /api/winds/colorado, /api/froude/colorado, etc.
+
+    Parameters
+    ----------
+    cycle_utc : str   e.g. "2026-03-01T18:00Z"
+    fxx       : int   forecast hour 0-18
+
+    Returns
+    -------
+    dict with keys: points, valid_utc, cycle_utc, fxx, point_count,
+                    cell_size_deg, model, transport_wind_method
+    """
+    # Parse cycle string → naive datetime for Herbie
+    cycle_dt = datetime.strptime(cycle_utc.replace("Z", ""), "%Y-%m-%dT%H:%M")
+    valid_dt  = cycle_dt + timedelta(hours=fxx)
+    valid_utc = valid_dt.strftime("%Y-%m-%dT%H:%M") + "Z"
+
+    logger.info("LLTI points: cycle=%s  fxx=%d", cycle_utc, fxx)
+
+    # ── reuse the same field-fetching logic, but with the requested fxx ───────
+    def fetch(product: str, search: str) -> xr.Dataset:
+        H = Herbie(cycle_dt, model="hrrr", product=product, fxx=fxx,
+                   save_dir=str(HERBIE_DIR), overwrite=True)
+        result = H.xarray(search, remove_grib=True)
+        if isinstance(result, list):
+            result = result[0] if result else xr.Dataset()
+        if isinstance(result, xr.DataArray):
+            result = result.to_dataset(name=result.name or "var")
+        return result
+
+    # Surface fields
+    lat2d_full = np.asarray(
+        fetch("sfc", ":TMP:2 m above ground:")["latitude"].values, dtype=np.float32)
+    lon2d_full = np.asarray(
+        fetch("sfc", ":TMP:2 m above ground:")["longitude"].values, dtype=np.float32)
+
+    mask     = _co_mask(lat2d_full, lon2d_full)
+    rsl, csl = _bounding_slices(mask)
+
+    def co(arr): return arr[rsl, csl]
+
+    lat2d = co(lat2d_full)
+    lon2d = co(np.where(lon2d_full > 180.0, lon2d_full - 360.0, lon2d_full))
+
+    hpbl_m  = co(_first_var_values(fetch("sfc", ":HPBL:surface:")))
+    orog_m  = co(_first_var_values(fetch("sfc", ":OROG:surface:")))
+    u10m    = co(_first_var_values(fetch("sfc", ":UGRD:10 m above ground:")))
+    v10m    = co(_first_var_values(fetch("sfc", ":VGRD:10 m above ground:")))
+    t2m_k   = co(_first_var_values(fetch("sfc", ":TMP:2 m above ground:")))
+    dpt_k   = co(_first_var_values(fetch("sfc", ":DPT:2 m above ground:")))
+    tcc_pct = co(_first_var_values(fetch("sfc", ":TCDC:entire atmosphere:")))
+
+    mix_ft = hpbl_m * M_TO_FT
+    t_f    = _k_to_f(t2m_k)
+    td_f   = _k_to_f(dpt_k)
+
+    # Pressure-level fields for transport wind
+    u_prs_list, v_prs_list, hgt_prs_list = [], [], []
+    for mb in TRANSPORT_LEVELS_MB:
+        u_prs_list.append(  co(_first_var_values(fetch("prs", f":UGRD:{mb} mb:"))))
+        v_prs_list.append(  co(_first_var_values(fetch("prs", f":VGRD:{mb} mb:"))))
+        hgt_prs_list.append(co(_first_var_values(fetch("prs", f":HGT:{mb} mb:"))))
+
+    u_prs   = np.stack(u_prs_list,   axis=0).astype(np.float32)
+    v_prs   = np.stack(v_prs_list,   axis=0).astype(np.float32)
+    hgt_prs = np.stack(hgt_prs_list, axis=0).astype(np.float32)
+
+    trspd_kt, _, _ = _compute_transport_wind(
+        u10m=u10m, v10m=v10m,
+        u_prs=u_prs, v_prs=v_prs,
+        hgt_prs=hgt_prs, orog=orog_m, hpbl=hpbl_m,
+    )
+
+    llti2d = compute_llti(mix_ft, trspd_kt, tcc_pct, t_f, td_f)
+
+    # ── Build point list (subsampled for map performance) ─────────────────────
+    ny, nx = llti2d.shape
+    points = []
+    for iy in range(0, ny, _STRIDE):
+        for ix in range(0, nx, _STRIDE):
+            score = float(llti2d[iy, ix])
+            points.append({
+                "lat":      round(float(lat2d[iy, ix]),  3),
+                "lon":      round(float(lon2d[iy, ix]),  3),
+                "llti":     round(score, 1),
+                "cat":      _cat_from_llti(score),
+                "mix_ft":   round(float(mix_ft[iy, ix]),   0),
+                "trspd_kt": round(float(trspd_kt[iy, ix]), 1),
+                "sky_pct":  round(float(tcc_pct[iy, ix]),  0),
+                "dd_f":     round(float(np.clip(
+                                t_f[iy, ix] - td_f[iy, ix], 0, None)), 1),
+            })
+
+    return {
+        "points":               points,
+        "valid_utc":            valid_utc,
+        "cycle_utc":            cycle_utc,
+        "fxx":                  fxx,
+        "point_count":          len(points),
+        "cell_size_deg":        0.05,
+        "model":                "HRRR",
+        "transport_wind_method": "HPBL-coupled thickness-weighted mean",
+        "transport_wind_levels_mb": TRANSPORT_LEVELS_MB,
+    }
+
+
+def get_llti_points_cached(cycle_utc: str, fxx: int = 1,
+                            ttl_seconds: int = 600) -> dict:
+    """
+    Return point data for the map, cached per (cycle_utc, fxx).
+    """
+    key = (cycle_utc, fxx)
+    now = time.time()
+    entry = _POINTS_CACHE.get(key)
+    if entry is None or (now - entry["ts"]) > ttl_seconds:
+        logger.info("LLTI points cache miss – cycle=%s fxx=%d", cycle_utc, fxx)
+        data = fetch_llti_points(cycle_utc, fxx)
+        _POINTS_CACHE[key] = {"ts": now, "data": data}
+    return _POINTS_CACHE[key]["data"]
