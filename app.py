@@ -10,7 +10,7 @@ from icing         import get_icing_cached
 from winds_surface import get_surface_wind_cached
 from virga import get_virga_cached
 from prefetch import start_prefetch_thread, get_all_status
-from llti import get_llti_cached
+from llti import get_llti_cached, get llti_points_cached
 
 app = Flask(__name__)
 
@@ -84,6 +84,7 @@ HOME_TEMPLATE = """
       <p><a href="/map/hrrr">/map/winds</a> (HRRR Colorado Wind Gusts)</p>
       <p><a href="/map/froude">/map/froude</a> (HRRR Colorado Froude Number)</p>
       <p><a href="/map/virga">/map/virga</a> (HRRR Colorado Virga Potential)</p>
+      <p><a href="/map/llti">/map/llti</a> (HRRR Colorado LLTI)</p>
       <p><a href="/debug/routes">/debug/routes</a> (registered routes)</p>
     </div>
   </body>
@@ -257,6 +258,7 @@ HRRR_MAP_TEMPLATE = """<!doctype html>
       <option value="virga">Virga Potential</option>
       <option value="icing">Icing Threat</option>
       <option value="surface_wind">Surface Flow</option>
+      <option value="llti">LLTI</option>
     </select>
   </div>
 
@@ -491,6 +493,50 @@ const PRODUCTS = {
   <div class="leg-row"><div class="leg-swatch" style="background:#e74c3c"></div>&ge; 40 kt</div>
   <div style="margin-top:0.6rem;font-size:0.63rem;color:var(--muted);">
     White streamlines show flow direction &amp; speed.<br>Click any cell for wind details.
+  </div>`
+
+},
+
+  llti: {
+    label:    'LLTI',
+    endpoint: '/api/llti/colorado',
+    loadMsg:  'Fetching HRRR LLTI…<br><small style="color:var(--muted)">~90 s first load</small>',
+    color:    function(p) {
+      if (p.cat >= 3) return '#e74c3c';   // red    – high  (≥75)
+      if (p.cat >= 2) return '#FF8C00';   // orange – moderate (50-75)
+      if (p.cat >= 1) return '#FFD700';   // gold   – low (25-50)
+      return '#006400';                   // dark green – negligible (<25)
+    },
+    popup: function(p) {
+      return '<b>LLTI: ' + p.llti.toFixed(0) + '</b>' +
+             ' (cat ' + p.cat + ')<br>' +
+             'Mix Hgt: ' + p.mix_ft.toFixed(0) + ' ft<br>' +
+             'Transport Wind: ' + p.trspd_kt.toFixed(1) + ' kt<br>' +
+             'Sky: ' + p.sky_pct.toFixed(0) + '%<br>' +
+             'Dewpoint Dep: ' + p.dd_f.toFixed(1) + '°F<br>' +
+             p.lat.toFixed(3) + '°N, ' + Math.abs(p.lon).toFixed(3) + '°W';
+    },
+    legend: `<div class="leg-title">Low-Level Turbulence Index</div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#006400"></div>
+    &lt; 25 &mdash; Negligible
+  </div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#FFD700"></div>
+    25–50 &mdash; Low
+  </div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#FF8C00"></div>
+    50–75 &mdash; Moderate
+  </div>
+  <div class="leg-row">
+    <div class="leg-swatch" style="background:#e74c3c"></div>
+    &ge; 75 &mdash; High
+  </div>
+  <div style="margin-top:0.6rem;font-size:0.63rem;color:var(--muted);">
+    MixHgt(0.25) · TransWind(0.45)<br>
+    Sky(0.15) · DewDep(0.15)<br>
+    Transport wind: HPBL-coupled 10m+950–700mb
   </div>`
   }
 
@@ -1088,7 +1134,10 @@ def map_virga():
     from flask import redirect
     return redirect("/map/hrrr?product=virga")
 
-
+@app.get("/map/llti")
+def map_llti():
+    from flask import redirect
+    return redirect("/map/hrrr?product=llti")
 
 @app.get("/api/virga/colorado")
 def api_virga_colorado():
@@ -1448,8 +1497,37 @@ def api_llti_meta():
         import traceback
         return jsonify({"error": traceback.format_exc()}), 500
 
+@app.get("/api/llti/colorado")
+def api_llti_colorado():
+    fxx       = int(request.args.get("fxx", 1))
+    cycle_utc = request.args.get("cycle_utc")
+    ttl       = int(request.args.get("ttl", os.environ.get("LLTI_TTL", "600")))
+
+    if not cycle_utc:
+        status    = get_cycle_status_cached(ttl_seconds=300)
+        cycle_utc = status["cycles"][0]["cycle_utc"]
+
+    try:
+        data = get_llti_points_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=ttl)
+        return jsonify(data)
+    except Exception as e:
+        msg = str(e)
+        not_ready = any(k in msg.lower() for k in [
+            "did not find", "not found", "no such file", "404", "unavailable",
+            "nomads", "full file", "byte-range", "grib_lock timeout"
+        ])
+        if not_ready:
+            return jsonify({
+                "error":     "not_available",
+                "message":   f"F{fxx:02d} for cycle {cycle_utc} is not yet available.",
+                "fxx":       fxx,
+                "cycle_utc": cycle_utc,
+            }), 404
+        raise
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     tb = traceback.format_exc()
     return Response(tb, mimetype="text/plain", status=500)
+
 
