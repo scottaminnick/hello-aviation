@@ -1153,17 +1153,8 @@ def api_virga_colorado():
         data = get_virga_cached(cycle_utc=cycle_utc, fxx=fxx, ttl_seconds=ttl)
         return jsonify(data)
     except Exception as e:
-        msg = str(e)
-        not_ready = any(k in msg.lower() for k in [
-            "did not find", "not found", "no such file", "404", "unavailable"
-        ])
-        if not_ready:
-            return jsonify({
-                "error": "not_available",
-                "message": f"F{fxx:02d} for cycle {cycle_utc} is not yet on AWS.",
-                "fxx": fxx, "cycle_utc": cycle_utc,
-            }), 404
-        raise
+        import traceback
+        return Response(traceback.format_exec(), mimetype="text/plain", status=500)
 
 
 @app.get("/api/froude/colorado")
@@ -1529,6 +1520,7 @@ def api_llti_colorado():
 def handle_exception(e):
     tb = traceback.format_exc()
     return Response(tb, mimetype="text/plain", status=500)
+
 
 
 
